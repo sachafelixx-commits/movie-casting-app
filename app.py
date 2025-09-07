@@ -3,8 +3,6 @@ from PIL import Image
 import io
 from docx import Document
 from docx.shared import Inches
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
 
 # --- App setup ---
 st.set_page_config(page_title="Movie Casting Manager", layout="wide")
@@ -59,7 +57,7 @@ with st.expander("➕ Add New Participant"):
         height = st.text_input("Height")
         waist = st.text_input("Waist")
         dress_suit = st.text_input("Dress/Suit Size")
-        role = st.selectbox("Role/Status", ["Auditioned", "Booked", "Callback"])
+        role = st.text_input("Role/Status")  # Free text
         photo = st.file_uploader("Upload Picture", type=["png", "jpg", "jpeg"])
         submitted = st.form_submit_button("Save")
         if submitted:
@@ -78,11 +76,13 @@ with st.expander("➕ Add New Participant"):
 
 # --- Display participants in modern Apple-style cards ---
 def role_color(role):
-    return {
-        "Auditioned": "#FFD700",  # Gold
-        "Booked": "#32CD32",      # Green
-        "Callback": "#1E90FF"     # Blue
-    }.get(role, "#AAAAAA")        # Default grey
+    # Optional: basic color mapping
+    mapping = {
+        "Auditioned": "#FFD700",
+        "Booked": "#32CD32",
+        "Callback": "#1E90FF"
+    }
+    return mapping.get(role, "#AAAAAA")  # Default grey for custom roles
 
 project_data = st.session_state["projects"][current]
 cols = st.columns(3)
@@ -130,7 +130,7 @@ for idx, p in enumerate(project_data):
                 p["height"] = st.text_input("Height", value=p["height"])
                 p["waist"] = st.text_input("Waist", value=p["waist"])
                 p["dress_suit"] = st.text_input("Dress/Suit", value=p["dress_suit"])
-                p["role"] = st.selectbox("Role/Status", ["Auditioned", "Booked", "Callback"], index=["Auditioned","Booked","Callback"].index(p["role"]))
+                p["role"] = st.text_input("Role/Status", value=p["role"])  # Free text
                 new_photo = st.file_uploader("Upload new photo", type=["png", "jpg", "jpeg"], key=f"photo_{idx}")
                 if new_photo:
                     p["photo"] = new_photo.read()
@@ -144,7 +144,7 @@ for idx, p in enumerate(project_data):
             st.warning("Participant removed")
             st.experimental_rerun()
 
-# --- Export to Apple-style Word (.docx) with role/status color ---
+# --- Export to Apple-style Word (.docx) with free-text role ---
 st.subheader("📄 Export Participants (Word - Apple Style)")
 
 if st.button("Download Word File of current project"):
@@ -152,7 +152,6 @@ if st.button("Download Word File of current project"):
         doc = Document()
         doc.add_heading(f"Participants - {current}", 0)
         for p in project_data:
-            # Create table: 1 row, 2 columns: photo | info
             table = doc.add_table(rows=1, cols=2)
             table.autofit = False
             table.columns[0].width = Inches(1.7)
@@ -172,7 +171,7 @@ if st.button("Download Word File of current project"):
             else:
                 row_cells[0].text = "No Photo"
 
-            # Right: info with role/status
+            # Right: info
             info_text = f"Name: {p['name'] or 'Unnamed'}\n"
             info_text += f"Role: {p['role']}\n"
             info_text += f"Age: {p['age']}\n"

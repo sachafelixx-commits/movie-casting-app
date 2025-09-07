@@ -1,135 +1,180 @@
-# app.py
 import streamlit as st
+from PIL import Image
 from io import BytesIO
 from docx import Document
-from PIL import Image
+from docx.shared import Inches
+import hashlib
+import io
 
-# ------------------------------
-# Page config
-# ------------------------------
-st.set_page_config(page_title="Movie Casting Manager", layout="centered")
+# --- Page setup ---
+st.set_page_config(page_title="🎬 Movie Casting Manager", layout="wide")
 
-# ------------------------------
-# Session state for projects
-# ------------------------------
+# --- CSS for Apple-style look ---
+st.markdown("""
+<style>
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: #F8F9FA;
+}
+.card {
+    background-color:#FFFFFF;
+    border-radius:20px;
+    padding:15px;
+    margin-bottom:20px;
+    box-shadow:0 8px 20px rgba(0,0,0,0.08);
+    opacity:1;  /* fade-in simplified for Safari */
+    transform: translateY(0);
+}
+.card:hover {
+    transform: translateY(-5px);
+    box-shadow:0 12px 28px rgba(0,0,0,0.12);
+}
+.role-tag {
+    color:white;
+    padding:4px 10px;
+    border-radius:12px;
+    font-size:13px;
+    font-weight:500;
+    display:inline-block;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# --- App title ---
+st.markdown("<h1 style='text-align:center; color:#1E1E1E;'>🎬 Movie Casting Manager</h1>", unsafe_allow_html=True)
+
+# --- Session state for projects ---
 if "projects" not in st.session_state:
-    st.session_state.projects = {"Default Project": []}
+    st.session_state["projects"] = {"Default Project": []}
 
 if "current_project" not in st.session_state:
-    st.session_state.current_project = "Default Project"
+    st.session_state["current_project"] = "Default Project"
 
-# ------------------------------
-# Helper functions
-# ------------------------------
-def add_project(name):
-    if name and name not in st.session_state.projects:
-        st.session_state.projects[name] = []
-        st.session_state.current_project = name
-
-def rename_project(new_name):
-    if new_name and new_name not in st.session_state.projects:
-        st.session_state.projects[new_name] = st.session_state.projects.pop(st.session_state.current_project)
-        st.session_state.current_project = new_name
-
-def delete_project():
-    if len(st.session_state.projects) > 1:
-        st.session_state.projects.pop(st.session_state.current_project)
-        st.session_state.current_project = list(st.session_state.projects.keys())[0]
-
-def add_participant(name, role, age, agency, height, waist, dress, photo):
-    st.session_state.projects[st.session_state.current_project].append({
-        "name": name,
-        "role": role,
-        "age": age,
-        "agency": agency,
-        "height": height,
-        "waist": waist,
-        "dress": dress,
-        "photo": photo
-    })
-
-def export_to_word():
-    doc = Document()
-    doc.add_heading(f'Participants - {st.session_state.current_project}', level=1)
-    for p in st.session_state.projects[st.session_state.current_project]:
-        if p["photo"]:
-            image = Image.open(p["photo"])
-            img_bytes = BytesIO()
-            image.save(img_bytes, format='PNG')
-            doc.add_picture(BytesIO(img_bytes.getvalue()))
-        doc.add_paragraph(f'Name: {p["name"]}')
-        doc.add_paragraph(f'Role: {p["role"]}')
-        doc.add_paragraph(f'Age: {p["age"]}')
-        doc.add_paragraph(f'Agency: {p["agency"]}')
-        doc.add_paragraph(f'Height: {p["height"]}')
-        doc.add_paragraph(f'Waist: {p["waist"]}')
-        doc.add_paragraph(f'Dress/Suit: {p["dress"]}')
-        doc.add_paragraph('---------------------------')
-    buffer = BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
-
-# ------------------------------
-# Sidebar - Project Manager
-# ------------------------------
-st.sidebar.header("Project Manager")
-projects = list(st.session_state.projects.keys())
-selected_project = st.sidebar.selectbox("Select Project", projects, index=projects.index(st.session_state.current_project))
-st.session_state.current_project = selected_project
-
-new_project_name = st.sidebar.text_input("New Project Name")
-if st.sidebar.button("Add Project"):
-    add_project(new_project_name)
-
-rename_name = st.sidebar.text_input("Rename Project")
-if st.sidebar.button("Rename Project"):
-    rename_project(rename_name)
-
-if st.sidebar.button("Delete Project"):
-    delete_project()
-
-# ------------------------------
-# Participant Input
-# ------------------------------
-st.header(f"Project: {st.session_state.current_project}")
-
-with st.form("participant_form"):
-    name = st.text_input("Name")
-    role = st.text_input("Role")
-    age = st.text_input("Age")
-    agency = st.text_input("Agency")
-    height = st.text_input("Height")
-    waist = st.text_input("Waist")
-    dress = st.text_input("Dress/Suit")
-    photo = st.file_uploader("Photo", type=["png", "jpg", "jpeg"])
-    submitted = st.form_submit_button("Add Participant")
-    if submitted:
-        add_participant(name, role, age, agency, height, waist, dress, photo)
-
-# ------------------------------
-# Display Participants
-# ------------------------------
-st.subheader("Participants")
-for p in st.session_state.projects[st.session_state.current_project]:
-    st.write(f"**Name:** {p['name']}")
-    st.write(f"**Role:** {p['role']}")
-    st.write(f"**Age:** {p['age']}")
-    st.write(f"**Agency:** {p['agency']}")
-    st.write(f"**Height:** {p['height']}")
-    st.write(f"**Waist:** {p['waist']}")
-    st.write(f"**Dress/Suit:** {p['dress']}")
-    if p["photo"]:
-        st.image(p["photo"], width=150)
-    st.markdown("---")
-
-# ------------------------------
-# Export Button
-# ------------------------------
-buffer = export_to_word()
-st.download_button(
-    label="Export Participants to Word",
-    data=buffer,
-    file_name=f"{st.session_state.current_project}_participants.docx",
-    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+# --- Sidebar: project manager ---
+st.sidebar.header("📂 Project Manager")
+project_names = list(st.session_state["projects"].keys())
+selected_project = st.sidebar.selectbox(
+    "Select Project",
+    project_names,
+    index=project_names.index(st.session_state["current_project"])
 )
+st.session_state["current_project"] = selected_project
+current = st.session_state["current_project"]
+
+# Add new project
+with st.sidebar.expander("➕ Create Project"):
+    new_proj = st.text_input("Project name")
+    if st.button("Add Project"):
+        if new_proj and new_proj not in st.session_state["projects"]:
+            st.session_state["projects"][new_proj] = []
+            st.session_state["current_project"] = new_proj
+            st.success(f"Project '{new_proj}' added!")
+
+# Rename/Delete project
+with st.sidebar.expander("⚙️ Manage Project"):
+    rename_proj = st.text_input("Rename Project", value=current)
+    if st.button("Rename Project"):
+        if rename_proj and rename_proj not in st.session_state["projects"]:
+            st.session_state["projects"][rename_proj] = st.session_state["projects"].pop(current)
+            st.session_state["current_project"] = rename_proj
+            st.success(f"Renamed to '{rename_proj}'")
+    if st.button("🗑 Delete Project"):
+        if current in st.session_state["projects"] and len(st.session_state["projects"]) > 1:
+            st.session_state["projects"].pop(current)
+            st.session_state["current_project"] = list(st.session_state["projects"].keys())[0]
+            st.warning(f"Deleted '{current}'")
+
+# --- Function to get role color ---
+def role_color(role):
+    h = hashlib.md5(role.encode()).hexdigest()
+    r = int(h[:2], 16)
+    g = int(h[2:4], 16)
+    b = int(h[4:6], 16)
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+# --- Add participant ---
+st.markdown(f"<h2 style='color:#1E1E1E;'>Participants in {current}</h2>", unsafe_allow_html=True)
+with st.expander("➕ Add New Participant"):
+    with st.form("add_participant_form"):
+        name = st.text_input("Name")
+        age = st.text_input("Age")
+        agency = st.text_input("Agency")
+        height = st.text_input("Height")
+        waist = st.text_input("Waist")
+        dress_suit = st.text_input("Dress/Suit Size")
+        role = st.text_input("Role/Status")
+        photo = st.file_uploader("Upload Picture", type=["png","jpg","jpeg"])
+        submitted = st.form_submit_button("Save")
+        if submitted:
+            participant = {
+                "name": name,
+                "age": age,
+                "agency": agency,
+                "height": height,
+                "waist": waist,
+                "dress_suit": dress_suit,
+                "role": role,
+                "photo": photo.read() if photo else None
+            }
+            st.session_state["projects"][current].append(participant)
+            st.success(f"✅ {name} added!")
+
+# --- Display participants ---
+project_data = st.session_state["projects"][current]
+cols = st.columns(3)
+for idx, p in enumerate(project_data):
+    with cols[idx % 3]:
+        color = role_color(p["role"] or "default")
+        st.markdown(f"""
+        <div class="card">
+            <h3 style="margin-bottom:5px;">{p['name'] or 'Unnamed'}</h3>
+            <span class="role-tag" style="background-color:{color}">{p['role']}</span>
+        </div>
+        """, unsafe_allow_html=True)
+        if p["photo"]:
+            image = Image.open(io.BytesIO(p["photo"]))
+            st.image(image, width=150)
+        st.markdown(f"""
+        **Age:** {p['age']}  
+        **Agency:** {p['agency']}  
+        **Height:** {p['height']}  
+        **Waist:** {p['waist']}  
+        **Dress/Suit:** {p['dress_suit']}
+        """)
+
+# --- Word export ---
+st.subheader("📄 Export Participants (Word - Apple Style)")
+if st.button("Download Word File of current project"):
+    if project_data:
+        doc = Document()
+        doc.add_heading(f"Participants - {current}", 0)
+        for p in project_data:
+            table = doc.add_table(rows=1, cols=2)
+            table.autofit = False
+            table.columns[0].width = Inches(1.7)
+            table.columns[1].width = Inches(4.5)
+            row_cells = table.rows[0].cells
+            if p['photo']:
+                try:
+                    image_stream = BytesIO(p['photo'])
+                    paragraph = row_cells[0].paragraphs[0]
+                    run = paragraph.add_run()
+                    run.add_picture(image_stream, width=Inches(1.5))
+                except:
+                    row_cells[0].text = "No Photo"
+            else:
+                row_cells[0].text = "No Photo"
+            info_text = f"Name: {p['name'] or 'Unnamed'}\nRole: {p['role']}\nAge: {p['age']}\nAgency: {p['agency']}\nHeight: {p['height']}\nWaist: {p['waist']}\nDress/Suit: {p['dress_suit']}"
+            row_cells[1].text = info_text
+            doc.add_paragraph("\n")
+        word_stream = BytesIO()
+        doc.save(word_stream)
+        word_stream.seek(0)
+        st.download_button(
+            label="Click to download Apple-style Word file",
+            data=word_stream,
+            file_name=f"{current}_participants.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    else:
+        st.info("No participants in this project yet.")

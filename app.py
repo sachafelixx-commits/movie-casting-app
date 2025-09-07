@@ -123,8 +123,8 @@ with st.expander("➕ Add New Participant"):
 # --- Display participants (responsive layout) ---
 project_data = st.session_state["projects"][current]
 
-# Detect mobile screen: assume width < 500 pixels -> 1 column
-is_mobile = st.experimental_get_query_params().get("mobile", ["0"])[0] == "1"
+# Detect mobile screen via query param ?mobile=1
+is_mobile = st.query_params.get("mobile", ["0"])[0] == "1"
 num_cols = 1 if is_mobile else 3
 cols = st.columns(num_cols)
 
@@ -182,7 +182,7 @@ if st.button("Download Word File of current project"):
         doc.save(word_stream)
         word_stream.seek(0)
 
-        # Base64 download link (works on iOS Safari)
+        # Base64 download link (works on Safari)
         b64 = base64.b64encode(word_stream.read()).decode()
         href = f'<a href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64}" download="{current}_participants.docx">📥 Download Word File</a>'
         st.markdown(href, unsafe_allow_html=True)

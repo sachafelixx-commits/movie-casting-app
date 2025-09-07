@@ -3,6 +3,7 @@ from PIL import Image
 import io
 from docx import Document
 from docx.shared import Inches
+import hashlib
 
 # --- App setup ---
 st.set_page_config(page_title="Movie Casting Manager", layout="wide")
@@ -74,21 +75,22 @@ with st.expander("➕ Add New Participant"):
             st.session_state["projects"][current].append(participant)
             st.success(f"✅ {name} added!")
 
-# --- Display participants in modern Apple-style cards ---
+# --- Dynamic color generator based on role string ---
 def role_color(role):
-    # Optional: basic color mapping
-    mapping = {
-        "Auditioned": "#FFD700",
-        "Booked": "#32CD32",
-        "Callback": "#1E90FF"
-    }
-    return mapping.get(role, "#AAAAAA")  # Default grey for custom roles
+    # Generate a consistent hex color from the role string
+    h = hashlib.md5(role.encode()).hexdigest()
+    r = int(h[:2], 16)
+    g = int(h[2:4], 16)
+    b = int(h[4:6], 16)
+    return f"#{r:02X}{g:02X}{b:02X}"
 
+# --- Display participants in modern Apple-style cards ---
 project_data = st.session_state["projects"][current]
 cols = st.columns(3)
 
 for idx, p in enumerate(project_data):
     with cols[idx % 3]:
+        color = role_color(p["role"] or "default")
         st.markdown(f"""
         <div style="
             background-color:#F5F5F7;
@@ -100,7 +102,7 @@ for idx, p in enumerate(project_data):
         ">
             <h3 style="color:#1E1E1E; margin-bottom:5px;">{p['name'] or 'Unnamed'}</h3>
             <span style="
-                background-color:{role_color(p['role'])};
+                background-color:{color};
                 color:white;
                 padding:4px 10px;
                 border-radius:12px;
@@ -144,7 +146,7 @@ for idx, p in enumerate(project_data):
             st.warning("Participant removed")
             st.experimental_rerun()
 
-# --- Export to Apple-style Word (.docx) with free-text role ---
+# --- Export to Apple-style Word (.docx) with role ---
 st.subheader("📄 Export Participants (Word - Apple Style)")
 
 if st.button("Download Word File of current project"):

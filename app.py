@@ -1,13 +1,16 @@
 import streamlit as st
 from PIL import Image
 import io
-import pandas as pd
 from docx import Document
 from docx.shared import Inches
 
 # --- App setup ---
-st.set_page_config(page_title="🎥 Movie Casting Manager", layout="wide")
-st.markdown("<h1 style='text-align: center; color: #4B0082;'>🎬 Movie Casting Manager</h1>", unsafe_allow_html=True)
+st.set_page_config(page_title="Movie Casting Manager", layout="wide")
+st.markdown("""
+<h1 style='text-align: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color:#1E1E1E;'>
+🎬 Movie Casting Manager
+</h1>
+""", unsafe_allow_html=True)
 
 # --- Session state ---
 if "projects" not in st.session_state:
@@ -15,25 +18,24 @@ if "projects" not in st.session_state:
 if "current_project" not in st.session_state:
     st.session_state["current_project"] = "Default Project"
 
-# --- Sidebar controls ---
+# --- Sidebar for projects ---
 st.sidebar.header("📂 Project Manager")
 project_names = list(st.session_state["projects"].keys())
-current = st.sidebar.selectbox("Select a project", project_names, 
-                               index=project_names.index(st.session_state["current_project"]))
+current = st.sidebar.selectbox("Select Project", project_names, index=project_names.index(st.session_state["current_project"]))
 st.session_state["current_project"] = current
 
 # Add new project
-with st.sidebar.expander("➕ Create new project"):
+with st.sidebar.expander("➕ Create Project"):
     new_proj = st.text_input("Project name")
     if st.button("Add Project"):
         if new_proj and new_proj not in st.session_state["projects"]:
             st.session_state["projects"][new_proj] = []
             st.session_state["current_project"] = new_proj
-            st.success(f"Project '{new_proj}' created!")
+            st.success(f"Project '{new_proj}' added!")
 
-# Rename / delete project
-with st.sidebar.expander("⚙️ Manage project"):
-    rename_proj = st.text_input("Rename current project", value=current)
+# Rename/Delete Project
+with st.sidebar.expander("⚙️ Manage Project"):
+    rename_proj = st.text_input("Rename Project", value=current)
     if st.button("Rename Project"):
         if rename_proj and rename_proj not in st.session_state["projects"]:
             st.session_state["projects"][rename_proj] = st.session_state["projects"].pop(current)
@@ -45,9 +47,9 @@ with st.sidebar.expander("⚙️ Manage project"):
             st.session_state["current_project"] = list(st.session_state["projects"].keys())[0]
             st.warning(f"Deleted '{current}'")
 
-# --- Add participant ---
-st.markdown(f"<h2 style='color: #4B0082;'>Participants in {st.session_state['current_project']}</h2>", unsafe_allow_html=True)
-with st.expander("➕ Add new participant"):
+# --- Add Participant ---
+st.markdown(f"<h2 style='font-family: -apple-system, BlinkMacSystemFont; color:#1E1E1E;'>Participants in {current}</h2>", unsafe_allow_html=True)
+with st.expander("➕ Add New Participant"):
     with st.form("add_participant_form"):
         name = st.text_input("Name")
         age = st.text_input("Age")
@@ -65,19 +67,27 @@ with st.expander("➕ Add new participant"):
                 "height": height,
                 "waist": waist,
                 "dress_suit": dress_suit,
-                "photo": photo.read() if photo else None,
+                "photo": photo.read() if photo else None
             }
-            st.session_state["projects"][st.session_state["current_project"]].append(participant)
+            st.session_state["projects"][current].append(participant)
             st.success(f"✅ {name} added!")
 
-# --- Display participants in polished cards ---
-project_data = st.session_state["projects"][st.session_state["current_project"]]
-columns = st.columns(3)
+# --- Display participants in modern Apple-style cards ---
+project_data = st.session_state["projects"][current]
+cols = st.columns(3)
+
 for idx, p in enumerate(project_data):
-    with columns[idx % 3]:
+    with cols[idx % 3]:
         st.markdown(f"""
-        <div style="background-color:#E6E6FA; padding:10px; border-radius:10px; margin-bottom:10px;">
-        <h3 style="color:#4B0082;">{p['name'] or 'Unnamed'}</h3>
+        <div style="
+            background-color:#F5F5F7;
+            border-radius:20px;
+            padding:15px;
+            margin-bottom:15px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        ">
+            <h3 style="color:#1E1E1E; margin-bottom:5px;">{p['name'] or 'Unnamed'}</h3>
         </div>
         """, unsafe_allow_html=True)
 
@@ -94,7 +104,7 @@ for idx, p in enumerate(project_data):
         """)
 
         # Edit participant
-        with st.expander("✏️ Edit participant"):
+        with st.expander("✏️ Edit Participant"):
             with st.form(f"edit_form_{idx}"):
                 p["name"] = st.text_input("Name", value=p["name"])
                 p["age"] = st.text_input("Age", value=p["age"])
@@ -111,18 +121,16 @@ for idx, p in enumerate(project_data):
 
         # Delete participant
         if st.button(f"🗑 Delete {p['name'] or 'Participant'}", key=f"del_{idx}"):
-            st.session_state["projects"][st.session_state["current_project"]].pop(idx)
+            st.session_state["projects"][current].pop(idx)
             st.warning("Participant removed")
             st.experimental_rerun()
 
-# --- Export Word (.docx) ---
+# --- Export to Word (.docx) ---
 st.subheader("📄 Export Participants (Word)")
-
 if st.button("Download Word File of current project"):
     if project_data:
         doc = Document()
-        doc.add_heading(f"Participants - {st.session_state['current_project']}", 0)
-
+        doc.add_heading(f"Participants - {current}", 0)
         for p in project_data:
             doc.add_heading(p['name'] or "Unnamed", level=1)
             doc.add_paragraph(f"Age: {p['age']}")
@@ -143,13 +151,11 @@ if st.button("Download Word File of current project"):
         word_stream = BytesIO()
         doc.save(word_stream)
         word_stream.seek(0)
-
         st.download_button(
             label="Click to download Word file",
             data=word_stream,
-            file_name=f"{st.session_state['current_project']}_participants.docx",
+            file_name=f"{current}_participants.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
     else:
         st.info("No participants in this project yet.")
-

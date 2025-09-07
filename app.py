@@ -4,12 +4,12 @@ import io
 from docx import Document
 from docx.shared import Inches
 import hashlib
-import time
+import base64
 
 # --- Page setup ---
 st.set_page_config(page_title="🎬 Movie Casting Manager", layout="wide")
 
-# --- CSS for animations & Apple-style look ---
+# --- CSS for Apple-style look + Safari fixes ---
 st.markdown("""
 <style>
 body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #F8F9FA; }
@@ -21,14 +21,17 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Robo
     box-shadow:0 8px 20px rgba(0,0,0,0.08);
     opacity:0;
     transform: translateY(20px);
+    -webkit-transition: all 0.5s ease-out; 
     transition: all 0.5s ease-out;
 }
 .card.visible {
     opacity:1;
     transform: translateY(0);
+    -webkit-transform: translateY(0);
 }
 .card:hover {
     transform: translateY(-5px);
+    -webkit-transform: translateY(-5px);
     box-shadow:0 12px 28px rgba(0,0,0,0.12);
 }
 .role-tag {
@@ -42,23 +45,20 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Robo
 </style>
 """, unsafe_allow_html=True)
 
-# --- App title ---
 st.markdown("<h1 style='text-align:center; color:#1E1E1E;'>🎬 Movie Casting Manager</h1>", unsafe_allow_html=True)
 
-# --- Session state for projects & current project ---
+# --- Session state ---
 if "projects" not in st.session_state:
     st.session_state["projects"] = {"Default Project": []}
 if "current_project" not in st.session_state:
     st.session_state["current_project"] = "Default Project"
 
-# --- Sidebar: project manager ---
+# --- Sidebar Project Manager ---
 st.sidebar.header("📂 Project Manager")
 project_names = list(st.session_state["projects"].keys())
 selected_project = st.sidebar.selectbox(
     "Select Project", project_names, index=project_names.index(st.session_state["current_project"])
 )
-
-# Update current project (no rerun needed)
 st.session_state["current_project"] = selected_project
 current = st.session_state["current_project"]
 
@@ -71,7 +71,7 @@ with st.sidebar.expander("➕ Create Project"):
             st.session_state["current_project"] = new_proj
             st.success(f"Project '{new_proj}' added!")
 
-# Rename/Delete project
+# Rename/Delete Project
 with st.sidebar.expander("⚙️ Manage Project"):
     rename_proj = st.text_input("Rename Project", value=current)
     if st.button("Rename Project"):
@@ -85,12 +85,12 @@ with st.sidebar.expander("⚙️ Manage Project"):
             st.session_state["current_project"] = list(st.session_state["projects"].keys())[0]
             st.warning(f"Deleted '{current}'")
 
-# --- Function: role color ---
+# --- Role color ---
 def role_color(role):
     h = hashlib.md5(role.encode()).hexdigest()
-    r = int(h[:2], 16)
-    g = int(h[2:4], 16)
-    b = int(h[4:6], 16)
+    r = int(h[:2],16)
+    g = int(h[2:4],16)
+    b = int(h[4:6],16)
     return f"#{r:02X}{g:02X}{b:02X}"
 
 # --- Add participant ---
@@ -120,11 +120,16 @@ with st.expander("➕ Add New Participant"):
             st.session_state["projects"][current].append(participant)
             st.success(f"✅ {name} added!")
 
-# --- Display participants with fade-in animation ---
+# --- Display participants (responsive layout) ---
 project_data = st.session_state["projects"][current]
-cols = st.columns(3)
+
+# Detect mobile screen: assume width < 500 pixels -> 1 column
+is_mobile = st.experimental_get_query_params().get("mobile", ["0"])[0] == "1"
+num_cols = 1 if is_mobile else 3
+cols = st.columns(num_cols)
+
 for idx, p in enumerate(project_data):
-    with cols[idx % 3]:
+    with cols[idx % num_cols]:
         color = role_color(p["role"] or "default")
         st.markdown(f"""
         <div class="card visible">
@@ -134,6 +139,7 @@ for idx, p in enumerate(project_data):
         """, unsafe_allow_html=True)
         if p["photo"]:
             image = Image.open(io.BytesIO(p["photo"]))
+            image.thumbnail((300, 300))  # mobile-friendly
             st.image(image, width=150)
 
         st.markdown(f"""
@@ -144,7 +150,7 @@ for idx, p in enumerate(project_data):
         **Dress/Suit:** {p['dress_suit']}  
         """)
 
-# --- Word export ---
+# --- Export to Word via base64 (Safari-safe) ---
 st.subheader("📄 Export Participants (Word - Apple Style)")
 if st.button("Download Word File of current project"):
     if project_data:
@@ -158,8 +164,7 @@ if st.button("Download Word File of current project"):
             row_cells = table.rows[0].cells
 
             if p['photo']:
-                from io import BytesIO
-                image_stream = BytesIO(p['photo'])
+                image_stream = io.BytesIO(p['photo'])
                 try:
                     paragraph = row_cells[0].paragraphs[0]
                     run = paragraph.add_run()
@@ -173,16 +178,13 @@ if st.button("Download Word File of current project"):
             row_cells[1].text = info_text
             doc.add_paragraph("\n")
 
-        from io import BytesIO
-        word_stream = BytesIO()
+        word_stream = io.BytesIO()
         doc.save(word_stream)
         word_stream.seek(0)
 
-        st.download_button(
-            label="Click to download Apple-style Word file",
-            data=word_stream,
-            file_name=f"{current}_participants.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
+        # Base64 download link (works on iOS Safari)
+        b64 = base64.b64encode(word_stream.read()).decode()
+        href = f'<a href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64}" download="{current}_participants.docx">📥 Download Word File</a>'
+        st.markdown(href, unsafe_allow_html=True)
     else:
         st.info("No participants in this project yet.")

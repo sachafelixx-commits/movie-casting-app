@@ -2,6 +2,8 @@ import streamlit as st
 from PIL import Image
 import io
 import pandas as pd
+from docx import Document
+from docx.shared import Inches
 
 # --- App setup ---
 st.set_page_config(page_title="🎥 Movie Casting Manager", layout="wide")
@@ -20,6 +22,7 @@ current = st.sidebar.selectbox("Select a project", project_names,
                                index=project_names.index(st.session_state["current_project"]))
 st.session_state["current_project"] = current
 
+# Add new project
 with st.sidebar.expander("➕ Create new project"):
     new_proj = st.text_input("Project name")
     if st.button("Add Project"):
@@ -28,6 +31,7 @@ with st.sidebar.expander("➕ Create new project"):
             st.session_state["current_project"] = new_proj
             st.success(f"Project '{new_proj}' created!")
 
+# Rename / delete project
 with st.sidebar.expander("⚙️ Manage project"):
     rename_proj = st.text_input("Rename current project", value=current)
     if st.button("Rename Project"):
@@ -111,19 +115,41 @@ for idx, p in enumerate(project_data):
             st.warning("Participant removed")
             st.experimental_rerun()
 
-# --- Download CSV ---
-st.subheader("📥 Export Participants")
-if st.button("Download CSV of current project"):
+# --- Export Word (.docx) ---
+st.subheader("📄 Export Participants (Word)")
+
+if st.button("Download Word File of current project"):
     if project_data:
-        df = pd.DataFrame(project_data)
-        if "photo" in df.columns:
-            df["photo"] = df["photo"].apply(lambda x: "Uploaded" if x else "No Photo")
-        csv = df.to_csv(index=False).encode('utf-8')
+        doc = Document()
+        doc.add_heading(f"Participants - {st.session_state['current_project']}", 0)
+
+        for p in project_data:
+            doc.add_heading(p['name'] or "Unnamed", level=1)
+            doc.add_paragraph(f"Age: {p['age']}")
+            doc.add_paragraph(f"Agency: {p['agency']}")
+            doc.add_paragraph(f"Height: {p['height']}")
+            doc.add_paragraph(f"Waist: {p['waist']}")
+            doc.add_paragraph(f"Dress/Suit: {p['dress_suit']}")
+            if p['photo']:
+                try:
+                    from io import BytesIO
+                    image_stream = BytesIO(p['photo'])
+                    doc.add_picture(image_stream, width=Inches(1.5))
+                except Exception as e:
+                    print("Error adding image:", e)
+            doc.add_paragraph("---------------------------")
+
+        from io import BytesIO
+        word_stream = BytesIO()
+        doc.save(word_stream)
+        word_stream.seek(0)
+
         st.download_button(
-            label="Click to download CSV",
-            data=csv,
-            file_name=f"{st.session_state['current_project']}_participants.csv",
-            mime='text/csv'
+            label="Click to download Word file",
+            data=word_stream,
+            file_name=f"{st.session_state['current_project']}_participants.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
     else:
         st.info("No participants in this project yet.")
+

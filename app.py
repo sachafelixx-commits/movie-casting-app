@@ -125,34 +125,56 @@ for idx, p in enumerate(project_data):
             st.warning("Participant removed")
             st.experimental_rerun()
 
-# --- Export to Word (.docx) ---
-st.subheader("📄 Export Participants (Word)")
+# --- Export to Apple-style Word (.docx) ---
+st.subheader("📄 Export Participants (Word - Apple Style)")
+
 if st.button("Download Word File of current project"):
     if project_data:
         doc = Document()
         doc.add_heading(f"Participants - {current}", 0)
         for p in project_data:
-            doc.add_heading(p['name'] or "Unnamed", level=1)
-            doc.add_paragraph(f"Age: {p['age']}")
-            doc.add_paragraph(f"Agency: {p['agency']}")
-            doc.add_paragraph(f"Height: {p['height']}")
-            doc.add_paragraph(f"Waist: {p['waist']}")
-            doc.add_paragraph(f"Dress/Suit: {p['dress_suit']}")
-            if p['photo']:
-                try:
-                    from io import BytesIO
-                    image_stream = BytesIO(p['photo'])
-                    doc.add_picture(image_stream, width=Inches(1.5))
-                except Exception as e:
-                    print("Error adding image:", e)
-            doc.add_paragraph("---------------------------")
+            # Create a table with 1 row, 2 columns: Photo | Info
+            table = doc.add_table(rows=1, cols=2)
+            table.autofit = False
+            table.columns[0].width = Inches(1.7)  # Photo column
+            table.columns[1].width = Inches(4.5)  # Info column
 
+            row_cells = table.rows[0].cells
+
+            # Left: photo
+            if p['photo']:
+                from io import BytesIO
+                image_stream = BytesIO(p['photo'])
+                try:
+                    paragraph = row_cells[0].paragraphs[0]
+                    run = paragraph.add_run()
+                    run.add_picture(image_stream, width=Inches(1.5))
+                except Exception as e:
+                    paragraph = row_cells[0].paragraphs[0]
+                    paragraph.add_run("No Photo")
+            else:
+                row_cells[0].text = "No Photo"
+
+            # Right: participant info
+            info_text = f"Name: {p['name'] or 'Unnamed'}\n"
+            info_text += f"Age: {p['age']}\n"
+            info_text += f"Agency: {p['agency']}\n"
+            info_text += f"Height: {p['height']}\n"
+            info_text += f"Waist: {p['waist']}\n"
+            info_text += f"Dress/Suit: {p['dress_suit']}"
+            row_cells[1].text = info_text
+
+            # Add spacing after each table
+            doc.add_paragraph("\n")
+
+        # Save Word doc to memory
         from io import BytesIO
         word_stream = BytesIO()
         doc.save(word_stream)
         word_stream.seek(0)
+
         st.download_button(
-            label="Click to download Word file",
+            label="Click to download Apple-style Word file",
             data=word_stream,
             file_name=f"{current}_participants.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"

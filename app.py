@@ -7,43 +7,56 @@ import hashlib
 import base64
 
 # --- Page setup ---
-st.set_page_config(page_title="🎬 Movie Casting Manager", layout="wide")
+st.set_page_config(page_title="🎬 Movie Casting Manager", layout="centered")  # mobile-friendly
 
-# --- CSS for Apple-style look + Safari fixes ---
-st.markdown("""
-<style>
-body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #F8F9FA; }
-.card {
-    background-color:#FFFFFF;
-    border-radius:20px;
-    padding:15px;
-    margin-bottom:20px;
-    box-shadow:0 8px 20px rgba(0,0,0,0.08);
-    opacity:0;
-    transform: translateY(20px);
-    -webkit-transition: all 0.5s ease-out; 
-    transition: all 0.5s ease-out;
-}
-.card.visible {
-    opacity:1;
-    transform: translateY(0);
-    -webkit-transform: translateY(0);
-}
-.card:hover {
-    transform: translateY(-5px);
-    -webkit-transform: translateY(-5px);
-    box-shadow:0 12px 28px rgba(0,0,0,0.12);
-}
-.role-tag {
-    color:white;
-    padding:4px 10px;
-    border-radius:12px;
-    font-size:13px;
-    font-weight:500;
-    display:inline-block;
-}
-</style>
-""", unsafe_allow_html=True)
+# --- CSS for Apple-style look (disable animations for mobile) ---
+is_mobile = st.query_params.get("mobile", ["0"])[0] == "1"
+
+if not is_mobile:
+    # Only animate on desktop
+    st.markdown("""
+    <style>
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #F8F9FA; }
+    .card {
+        background-color:#FFFFFF;
+        border-radius:20px;
+        padding:15px;
+        margin-bottom:20px;
+        box-shadow:0 8px 20px rgba(0,0,0,0.08);
+        opacity:0;
+        transform: translateY(20px);
+        -webkit-transition: all 0.5s ease-out; 
+        transition: all 0.5s ease-out;
+    }
+    .card.visible {
+        opacity:1;
+        transform: translateY(0);
+        -webkit-transform: translateY(0);
+    }
+    .card:hover {
+        transform: translateY(-5px);
+        -webkit-transform: translateY(-5px);
+        box-shadow:0 12px 28px rgba(0,0,0,0.12);
+    }
+    .role-tag {
+        color:white;
+        padding:4px 10px;
+        border-radius:12px;
+        font-size:13px;
+        font-weight:500;
+        display:inline-block;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+else:
+    # Mobile Safari: disable animations
+    st.markdown("""
+    <style>
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #F8F9FA; }
+    .card { opacity: 1 !important; transform: none !important; }
+    .role-tag { color:white; padding:4px 10px; border-radius:12px; font-size:13px; font-weight:500; display:inline-block; }
+    </style>
+    """, unsafe_allow_html=True)
 
 st.markdown("<h1 style='text-align:center; color:#1E1E1E;'>🎬 Movie Casting Manager</h1>", unsafe_allow_html=True)
 
@@ -122,9 +135,6 @@ with st.expander("➕ Add New Participant"):
 
 # --- Display participants (responsive layout) ---
 project_data = st.session_state["projects"][current]
-
-# Detect mobile screen via query param ?mobile=1
-is_mobile = st.query_params.get("mobile", ["0"])[0] == "1"
 num_cols = 1 if is_mobile else 3
 cols = st.columns(num_cols)
 
@@ -139,7 +149,7 @@ for idx, p in enumerate(project_data):
         """, unsafe_allow_html=True)
         if p["photo"]:
             image = Image.open(io.BytesIO(p["photo"]))
-            image.thumbnail((300, 300))  # mobile-friendly
+            image.thumbnail((300, 300))
             st.image(image, width=150)
 
         st.markdown(f"""
@@ -150,7 +160,7 @@ for idx, p in enumerate(project_data):
         **Dress/Suit:** {p['dress_suit']}  
         """)
 
-# --- Export to Word via base64 (Safari-safe) ---
+# --- Export Word (Safari-safe) ---
 st.subheader("📄 Export Participants (Word - Apple Style)")
 if st.button("Download Word File of current project"):
     if project_data:
@@ -182,7 +192,7 @@ if st.button("Download Word File of current project"):
         doc.save(word_stream)
         word_stream.seek(0)
 
-        # Base64 download link (works on Safari)
+        # Base64 download link for Safari/iPhone
         b64 = base64.b64encode(word_stream.read()).decode()
         href = f'<a href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64}" download="{current}_participants.docx">📥 Download Word File</a>'
         st.markdown(href, unsafe_allow_html=True)

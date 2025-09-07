@@ -3,6 +3,8 @@ from PIL import Image
 import io
 from docx import Document
 from docx.shared import Inches
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 # --- App setup ---
 st.set_page_config(page_title="Movie Casting Manager", layout="wide")
@@ -57,6 +59,7 @@ with st.expander("➕ Add New Participant"):
         height = st.text_input("Height")
         waist = st.text_input("Waist")
         dress_suit = st.text_input("Dress/Suit Size")
+        role = st.selectbox("Role/Status", ["Auditioned", "Booked", "Callback"])
         photo = st.file_uploader("Upload Picture", type=["png", "jpg", "jpeg"])
         submitted = st.form_submit_button("Save")
         if submitted:
@@ -67,12 +70,20 @@ with st.expander("➕ Add New Participant"):
                 "height": height,
                 "waist": waist,
                 "dress_suit": dress_suit,
+                "role": role,
                 "photo": photo.read() if photo else None
             }
             st.session_state["projects"][current].append(participant)
             st.success(f"✅ {name} added!")
 
 # --- Display participants in modern Apple-style cards ---
+def role_color(role):
+    return {
+        "Auditioned": "#FFD700",  # Gold
+        "Booked": "#32CD32",      # Green
+        "Callback": "#1E90FF"     # Blue
+    }.get(role, "#AAAAAA")        # Default grey
+
 project_data = st.session_state["projects"][current]
 cols = st.columns(3)
 
@@ -88,6 +99,13 @@ for idx, p in enumerate(project_data):
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         ">
             <h3 style="color:#1E1E1E; margin-bottom:5px;">{p['name'] or 'Unnamed'}</h3>
+            <span style="
+                background-color:{role_color(p['role'])};
+                color:white;
+                padding:4px 10px;
+                border-radius:12px;
+                font-size:12px;
+            ">{p['role']}</span>
         </div>
         """, unsafe_allow_html=True)
 
@@ -112,6 +130,7 @@ for idx, p in enumerate(project_data):
                 p["height"] = st.text_input("Height", value=p["height"])
                 p["waist"] = st.text_input("Waist", value=p["waist"])
                 p["dress_suit"] = st.text_input("Dress/Suit", value=p["dress_suit"])
+                p["role"] = st.selectbox("Role/Status", ["Auditioned", "Booked", "Callback"], index=["Auditioned","Booked","Callback"].index(p["role"]))
                 new_photo = st.file_uploader("Upload new photo", type=["png", "jpg", "jpeg"], key=f"photo_{idx}")
                 if new_photo:
                     p["photo"] = new_photo.read()
@@ -125,7 +144,7 @@ for idx, p in enumerate(project_data):
             st.warning("Participant removed")
             st.experimental_rerun()
 
-# --- Export to Apple-style Word (.docx) ---
+# --- Export to Apple-style Word (.docx) with role/status color ---
 st.subheader("📄 Export Participants (Word - Apple Style)")
 
 if st.button("Download Word File of current project"):
@@ -133,12 +152,11 @@ if st.button("Download Word File of current project"):
         doc = Document()
         doc.add_heading(f"Participants - {current}", 0)
         for p in project_data:
-            # Create a table with 1 row, 2 columns: Photo | Info
+            # Create table: 1 row, 2 columns: photo | info
             table = doc.add_table(rows=1, cols=2)
             table.autofit = False
-            table.columns[0].width = Inches(1.7)  # Photo column
-            table.columns[1].width = Inches(4.5)  # Info column
-
+            table.columns[0].width = Inches(1.7)
+            table.columns[1].width = Inches(4.5)
             row_cells = table.rows[0].cells
 
             # Left: photo
@@ -149,14 +167,14 @@ if st.button("Download Word File of current project"):
                     paragraph = row_cells[0].paragraphs[0]
                     run = paragraph.add_run()
                     run.add_picture(image_stream, width=Inches(1.5))
-                except Exception as e:
-                    paragraph = row_cells[0].paragraphs[0]
-                    paragraph.add_run("No Photo")
+                except:
+                    row_cells[0].text = "No Photo"
             else:
                 row_cells[0].text = "No Photo"
 
-            # Right: participant info
+            # Right: info with role/status
             info_text = f"Name: {p['name'] or 'Unnamed'}\n"
+            info_text += f"Role: {p['role']}\n"
             info_text += f"Age: {p['age']}\n"
             info_text += f"Agency: {p['agency']}\n"
             info_text += f"Height: {p['height']}\n"
@@ -164,7 +182,6 @@ if st.button("Download Word File of current project"):
             info_text += f"Dress/Suit: {p['dress_suit']}"
             row_cells[1].text = info_text
 
-            # Add spacing after each table
             doc.add_paragraph("\n")
 
         # Save Word doc to memory

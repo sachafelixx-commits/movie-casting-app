@@ -10,11 +10,14 @@ import os
 from datetime import date
 
 # ------------------------
-# Helpers for persistence
+# Files for data persistence
 # ------------------------
 DATA_FILE = "casting_data.json"
-CREDENTIALS = {"casting_director": "password123"}  # Replace with your secure password
+USERS_FILE = "users.json"
 
+# ------------------------
+# Helper functions
+# ------------------------
 def save_data():
     with open(DATA_FILE, "w") as f:
         json.dump(st.session_state["projects"], f)
@@ -24,6 +27,19 @@ def load_data():
         with open(DATA_FILE, "r") as f:
             return json.load(f)
     return {"Default Project": []}
+
+def save_users(users):
+    with open(USERS_FILE, "w") as f:
+        json.dump(users, f)
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
 def photo_to_b64(photo_bytes):
     return base64.b64encode(photo_bytes).decode("utf-8")
@@ -39,10 +55,9 @@ def role_color(role):
     return f"#{r:02X}{g:02X}{b:02X}"
 
 # ------------------------
-# Page setup
+# Streamlit page setup
 # ------------------------
 st.set_page_config(page_title="Sacha's Casting Manager", layout="wide")
-
 st.markdown("""
 <style>
 .card { background-color:#FAFAFA; border-radius:20px; padding:20px; margin-bottom:20px; box-shadow:0 6px 16px rgba(0,0,0,0.06);}
@@ -57,28 +72,53 @@ st.markdown("""
 # ------------------------
 # Initialize session state
 # ------------------------
-if "page" not in st.session_state: st.session_state["page"] = "login"
+if "page" not in st.session_state: st.session_state["page"] = "auth"
+if "auth_mode" not in st.session_state: st.session_state["auth_mode"] = "login"  # login or signup
 if "logged_in" not in st.session_state: st.session_state["logged_in"] = False
 if "projects" not in st.session_state: st.session_state["projects"] = load_data()
 if "current_project" not in st.session_state: st.session_state["current_project"] = "Default Project"
 if "editing" not in st.session_state: st.session_state["editing"] = None
+users = load_users()
 
 # ------------------------
-# Login Page
+# Authentication Page
 # ------------------------
-if st.session_state["page"] == "login":
+if st.session_state["page"] == "auth":
     st.title("🎬 Sacha's Casting Manager")
-    st.subheader("Login to continue")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    if st.button("Login"):
-        if username in CREDENTIALS and CREDENTIALS[username] == password:
-            st.session_state["logged_in"] = True
-            st.session_state["page"] = "main"
-            st.success("Login successful!")
+    if st.session_state["auth_mode"] == "login":
+        st.subheader("Login")
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        if st.button("Login"):
+            if username in users and users[username] == hash_password(password):
+                st.session_state["logged_in"] = True
+                st.session_state["page"] = "main"
+                st.success("Login successful!")
+                st.experimental_rerun()
+            else:
+                st.error("Invalid credentials")
+        st.write("Don't have an account? [Sign Up](#)", unsafe_allow_html=True)
+        if st.button("Switch to Sign Up"):
+            st.session_state["auth_mode"] = "signup"
             st.experimental_rerun()
-        else:
-            st.error("Invalid credentials")
+    else:
+        st.subheader("Sign Up")
+        new_user = st.text_input("Choose a Username")
+        new_pass = st.text_input("Choose a Password", type="password")
+        if st.button("Sign Up"):
+            if new_user in users:
+                st.error("Username already exists")
+            elif new_user and new_pass:
+                users[new_user] = hash_password(new_pass)
+                save_users(users)
+                st.success("Sign up successful! You can now log in.")
+                st.session_state["auth_mode"] = "login"
+                st.experimental_rerun()
+            else:
+                st.warning("Enter both username and password")
+        if st.button("Switch to Login"):
+            st.session_state["auth_mode"] = "login"
+            st.experimental_rerun()
     st.stop()
 
 # ------------------------
@@ -221,55 +261,4 @@ if st.session_state["editing"] is not None:
                     "role": role, "availability": str(availability)
                 })
                 if photo:
-                    p["photo"] = photo_to_b64(photo.read())
-                st.session_state["projects"][current][edit_idx] = p
-                save_data()
-                st.success("Updated successfully!")
-                st.session_state["editing"] = None
-                st.experimental_rerun()
-            elif cancel:
-                st.session_state["editing"] = None
-                st.experimental_rerun()
-
-# ------------------------
-# Export to Word
-# ------------------------
-st.subheader("📄 Export Participants")
-if st.button("Download Word File of current project"):
-    if project_data:
-        doc = Document()
-        doc.add_heading(f"Participants - {current}", 0)
-        for p in project_data:
-            table = doc.add_table(rows=1, cols=2)
-            table.autofit = False
-            table.columns[0].width = Inches(1.7)
-            table.columns[1].width = Inches(4.5)
-            row_cells = table.rows[0].cells
-
-            if p["photo"]:
-                image_stream = io.BytesIO(b64_to_photo(p["photo"]))
-                try:
-                    paragraph = row_cells[0].paragraphs[0]
-                    run = paragraph.add_run()
-                    run.add_picture(image_stream, width=Inches(1.5))
-                except:
-                    row_cells[0].text = "No Photo"
-            else:
-                row_cells[0].text = "No Photo"
-
-            info_text = f"Number: {p.get('number','')}\nName: {p['name'] or 'Unnamed'}\nRole: {p['role']}\nAge: {p['age']}\nAgency: {p['agency']}\nHeight: {p['height']}\nWaist: {p['waist']}\nDress/Suit: {p['dress_suit']}\nNext Available: {p['availability']}"
-            row_cells[1].text = info_text
-            doc.add_paragraph("\n")
-
-        word_stream = io.BytesIO()
-        doc.save(word_stream)
-        word_stream.seek(0)
-
-        st.download_button(
-            label="Click to download Word file",
-            data=word_stream,
-            file_name=f"{current}_participants.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
-    else:
-        st.info("No participants in this project yet.")
+                    p["photo"] =

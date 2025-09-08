@@ -312,4 +312,15 @@ else:
                 else:
                     row_cells[0].text = "No Photo"
 
-                info_text = (f"Number: {p.get('number','')}
+info_text = (
+    f"Number: {p.get('number','')}\n"
+    f"Name: {p['name']}\n"
+    f"Role: {p['role']}\n"
+    f"Age: {p['age']}\n"
+    f"Agency: {p['agency']}\n"
+    f"Height: {p['height']}\n"
+    f"Waist: {p['waist']}\n"
+    f"Dress/Suit: {p['dress_suit']}\n"
+    f"Next Available: {p['availability']}"
+)
+

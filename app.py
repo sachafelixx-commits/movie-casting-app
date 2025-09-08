@@ -39,10 +39,6 @@ st.set_page_config(page_title="🎬 Movie Casting Manager", layout="wide")
 # Custom CSS
 st.markdown("""
 <style>
-body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background-color: #F8F9FA;
-}
 .card {
     background-color: #FAFAFA;
     border-radius: 20px;
@@ -78,6 +74,9 @@ body {
     padding-top: 6px;
     margin-top: 6px;
 }
+.action-buttons {
+    margin-top: 10px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -88,6 +87,8 @@ if "projects" not in st.session_state:
     st.session_state["projects"] = load_data()
 if "current_project" not in st.session_state:
     st.session_state["current_project"] = "Default Project"
+if "editing" not in st.session_state:
+    st.session_state["editing"] = None  # holds index of participant being edited
 
 # ------------------------
 # Sidebar: project manager
@@ -198,8 +199,65 @@ for idx, p in enumerate(project_data):
         <div class="detail-row"><span class="detail-label">Height:</span> <span class="detail-value">{p['height']}</span></div>
         <div class="detail-row"><span class="detail-label">Waist:</span> <span class="detail-value">{p['waist']}</span></div>
         <div class="detail-row"><span class="detail-label">Dress/Suit:</span> <span class="detail-value">{p['dress_suit']}</span></div>
-        </div>
         """, unsafe_allow_html=True)
+
+        # Action buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("✏️ Edit", key=f"edit_{idx}"):
+                st.session_state["editing"] = idx
+                st.rerun()
+        with col2:
+            if st.button("🗑 Delete", key=f"delete_{idx}"):
+                st.session_state["projects"][current].pop(idx)
+                save_data()
+                st.warning("Deleted!")
+                st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)  # close card div
+
+# ------------------------
+# Edit form (inline)
+# ------------------------
+if st.session_state["editing"] is not None:
+    edit_idx = st.session_state["editing"]
+    if edit_idx < len(project_data):
+        p = project_data[edit_idx]
+        st.subheader(f"✏️ Edit Participant #{p.get('number','')}")
+        with st.form("edit_participant_form"):
+            number = st.number_input("Participant #", min_value=1, value=int(p.get("number", edit_idx+1)))
+            name = st.text_input("Name", value=p["name"])
+            age = st.text_input("Age", value=p["age"])
+            agency = st.text_input("Agency", value=p["agency"])
+            height = st.text_input("Height", value=p["height"])
+            waist = st.text_input("Waist", value=p["waist"])
+            dress_suit = st.text_input("Dress/Suit Size", value=p["dress_suit"])
+            role = st.text_input("Role/Status", value=p["role"])
+            photo = st.file_uploader("Upload Picture (leave empty to keep current)", type=["png", "jpg", "jpeg"])
+            save_changes = st.form_submit_button("💾 Save Changes")
+            cancel = st.form_submit_button("❌ Cancel")
+
+            if save_changes:
+                p.update({
+                    "number": number,
+                    "name": name,
+                    "age": age,
+                    "agency": agency,
+                    "height": height,
+                    "waist": waist,
+                    "dress_suit": dress_suit,
+                    "role": role,
+                })
+                if photo:
+                    p["photo"] = photo_to_b64(photo.read())
+                st.session_state["projects"][current][edit_idx] = p
+                save_data()
+                st.success("Updated successfully!")
+                st.session_state["editing"] = None
+                st.rerun()
+            elif cancel:
+                st.session_state["editing"] = None
+                st.rerun()
 
 # ------------------------
 # Export to Word

@@ -97,7 +97,7 @@ if st.session_state["page"] == "auth":
                 st.experimental_rerun()
             else:
                 st.error("Invalid credentials")
-        st.write("Don't have an account? [Sign Up](#)", unsafe_allow_html=True)
+        st.write("Don't have an account? Switch to Sign Up below.")
         if st.button("Switch to Sign Up"):
             st.session_state["auth_mode"] = "signup"
             st.experimental_rerun()
@@ -289,27 +289,4 @@ if st.button("Download Word File of current project"):
             if p["photo"]:
                 image_stream = io.BytesIO(b64_to_photo(p["photo"]))
                 try:
-                    paragraph = row_cells[0].paragraphs[0]
-                    run = paragraph.add_run()
-                    run.add_picture(image_stream, width=Inches(1.5))
-                except:
-                    row_cells[0].text = "No Photo"
-            else:
-                row_cells[0].text = "No Photo"
-
-            info_text = f"Number: {p.get('number','')}\nName: {p['name'] or 'Unnamed'}\nRole: {p['role']}\nAge: {p['age']}\nAgency: {p['agency']}\nHeight: {p['height']}\nWaist: {p['waist']}\nDress/Suit: {p['dress_suit']}\nNext Available: {p['availability']}"
-            row_cells[1].text = info_text
-            doc.add_paragraph("\n")
-
-        word_stream = io.BytesIO()
-        doc.save(word_stream)
-        word_stream.seek(0)
-
-        st.download_button(
-            label="Click to download Word file",
-            data=word_stream,
-            file_name=f"{current}_participants.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
-    else:
-        st.info("No participants in this project yet.")
+                    paragraph = row

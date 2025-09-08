@@ -314,13 +314,14 @@ else:
 
 info_text = (
     f"Number: {p.get('number','')}\n"
-    f"Name: {p['name']}\n"
-    f"Role: {p['role']}\n"
-    f"Age: {p['age']}\n"
-    f"Agency: {p['agency']}\n"
-    f"Height: {p['height']}\n"
-    f"Waist: {p['waist']}\n"
-    f"Dress/Suit: {p['dress_suit']}\n"
-    f"Next Available: {p['availability']}"
+    f"Name: {p.get('name','')}\n"
+    f"Role: {p.get('role','')}\n"
+    f"Age: {p.get('age','')}\n"
+    f"Agency: {p.get('agency','')}\n"
+    f"Height: {p.get('height','')}\n"
+    f"Waist: {p.get('waist','')}\n"
+    f"Dress/Suit: {p.get('dress_suit','')}\n"
+    f"Next Available: {p.get('availability','')}"
 )
+
 

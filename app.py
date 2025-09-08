@@ -188,7 +188,24 @@ else:
             st.header("Admin Dashboard")
 
             st.subheader("All Users")
-            st.json(users)
+            if users:
+                for uname, info in list(users.items()):
+                    if uname == "admin":
+                        st.markdown(f"**{uname}** (built-in Admin)")
+                        continue
+                    col1, col2, col3, col4, col5 = st.columns([2,2,3,3,1])
+                    col1.write(uname)
+                    col2.write(info.get("role", ""))
+                    col3.write(info.get("last_login", ""))
+                    col4.write(", ".join(info.get("projects_accessed", [])))
+                    if col5.button("❌", key=f"deluser_{uname}"):
+                        users.pop(uname)
+                        save_users(users)
+                        st.warning(f"User {uname} deleted.")
+                        log_action(current_user, "delete_user", uname)
+                        safe_rerun()
+            else:
+                st.info("No users yet.")
 
             st.subheader("Activity Logs")
             st.json(load_logs())

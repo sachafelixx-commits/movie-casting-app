@@ -7,11 +7,13 @@ import hashlib
 import json
 import base64
 import os
+from datetime import date
 
 # ------------------------
 # Helpers for persistence
 # ------------------------
 DATA_FILE = "casting_data.json"
+CREDENTIALS = {"casting_director": "password123"}  # Replace with your secure password
 
 def save_data():
     with open(DATA_FILE, "w") as f:
@@ -23,88 +25,67 @@ def load_data():
             return json.load(f)
     return {"Default Project": []}
 
-# Convert photo bytes to base64 string
 def photo_to_b64(photo_bytes):
     return base64.b64encode(photo_bytes).decode("utf-8")
 
-# Convert base64 string back to photo bytes
 def b64_to_photo(b64_str):
     return base64.b64decode(b64_str)
+
+def role_color(role):
+    h = hashlib.md5(role.encode()).hexdigest()
+    r = int(h[:2], 16)
+    g = int(h[2:4], 16)
+    b = int(h[4:6], 16)
+    return f"#{r:02X}{g:02X}{b:02X}"
 
 # ------------------------
 # Page setup
 # ------------------------
-st.set_page_config(page_title="🎬 Movie Casting Manager", layout="wide")
+st.set_page_config(page_title="Sacha's Casting Manager", layout="wide")
 
-# Custom CSS
 st.markdown("""
 <style>
-.card {
-    background-color: #FAFAFA;
-    border-radius: 20px;
-    padding: 20px;
-    margin-bottom: 20px;
-    box-shadow: 0 6px 16px rgba(0,0,0,0.06);
-    transition: all 0.3s ease-out;
-}
-.card h3 {
-    margin-bottom: 8px;
-    font-size: 20px;
-    font-weight: 600;
-    color: #222;
-}
-.role-tag {
-    color: white;
-    padding: 4px 10px;
-    border-radius: 12px;
-    font-size: 13px;
-    font-weight: 500;
-    display: inline-block;
-}
-.detail-label {
-    font-weight: 600;
-    color: #555;
-}
-.detail-value {
-    color: #222;
-    font-weight: 400;
-}
-.detail-row {
-    border-top: 1px solid #EEE;
-    padding-top: 6px;
-    margin-top: 6px;
-}
-.action-buttons {
-    margin-top: 10px;
-}
+.card { background-color:#FAFAFA; border-radius:20px; padding:20px; margin-bottom:20px; box-shadow:0 6px 16px rgba(0,0,0,0.06);}
+.card h3 { margin-bottom:8px; font-size:20px; font-weight:600; color:#222; }
+.role-tag { color:white; padding:4px 10px; border-radius:12px; font-size:13px; font-weight:500; display:inline-block; }
+.detail-label { font-weight:600; color:#555; }
+.detail-value { color:#222; font-weight:400; }
+.detail-row { border-top:1px solid #EEE; padding-top:6px; margin-top:6px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------------
-# Welcome Page
+# Initialize session state
 # ------------------------
-if "page" not in st.session_state:
-    st.session_state["page"] = "welcome"
+if "page" not in st.session_state: st.session_state["page"] = "login"
+if "logged_in" not in st.session_state: st.session_state["logged_in"] = False
+if "projects" not in st.session_state: st.session_state["projects"] = load_data()
+if "current_project" not in st.session_state: st.session_state["current_project"] = "Default Project"
+if "editing" not in st.session_state: st.session_state["editing"] = None
 
-if st.session_state["page"] == "welcome":
-    st.image("https://media.giphy.com/media/3o6ZsW0lMJ01aJxVRC/giphy.gif", width=200)
-    st.title("🎬 Welcome to Movie Casting Manager")
-    st.markdown("""
-    Manage your casting projects efficiently. Add participants, edit details, and export to Word effortlessly.
-    """)
-    if st.button("➡️ Go to App"):
-        st.session_state["page"] = "main"
+# ------------------------
+# Login Page
+# ------------------------
+if st.session_state["page"] == "login":
+    st.title("🎬 Sacha's Casting Manager")
+    st.subheader("Login to continue")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    if st.button("Login"):
+        if username in CREDENTIALS and CREDENTIALS[username] == password:
+            st.session_state["logged_in"] = True
+            st.session_state["page"] = "main"
+            st.success("Login successful!")
+            st.experimental_rerun()
+        else:
+            st.error("Invalid credentials")
     st.stop()
 
 # ------------------------
-# Load / init session state
+# Main App
 # ------------------------
-if "projects" not in st.session_state:
-    st.session_state["projects"] = load_data()
-if "current_project" not in st.session_state:
-    st.session_state["current_project"] = "Default Project"
-if "editing" not in st.session_state:
-    st.session_state["editing"] = None  # holds index of participant being edited
+if not st.session_state["logged_in"]:
+    st.stop()
 
 # ------------------------
 # Sidebar: project manager
@@ -117,7 +98,6 @@ selected_project = st.sidebar.selectbox(
 st.session_state["current_project"] = selected_project
 current = st.session_state["current_project"]
 
-# Add new project
 with st.sidebar.expander("➕ Create Project"):
     new_proj = st.text_input("Project name")
     if st.button("Add Project"):
@@ -126,9 +106,8 @@ with st.sidebar.expander("➕ Create Project"):
             st.session_state["current_project"] = new_proj
             save_data()
             st.success(f"Project '{new_proj}' added!")
-            st.rerun()
+            st.experimental_rerun()
 
-# Rename/Delete project
 with st.sidebar.expander("⚙️ Manage Project"):
     rename_proj = st.text_input("Rename Project", value=current)
     if st.button("Rename Project"):
@@ -137,29 +116,19 @@ with st.sidebar.expander("⚙️ Manage Project"):
             st.session_state["current_project"] = rename_proj
             save_data()
             st.success(f"Renamed to '{rename_proj}'")
-            st.rerun()
+            st.experimental_rerun()
     if st.button("🗑 Delete Project"):
         if current in st.session_state["projects"] and len(st.session_state["projects"]) > 1:
             st.session_state["projects"].pop(current)
             st.session_state["current_project"] = list(st.session_state["projects"].keys())[0]
             save_data()
             st.warning(f"Deleted '{current}'")
-            st.rerun()
-
-# ------------------------
-# Role color generator
-# ------------------------
-def role_color(role):
-    h = hashlib.md5(role.encode()).hexdigest()
-    r = int(h[:2], 16)
-    g = int(h[2:4], 16)
-    b = int(h[4:6], 16)
-    return f"#{r:02X}{g:02X}{b:02X}"
+            st.experimental_rerun()
 
 # ------------------------
 # Add participant
 # ------------------------
-st.markdown(f"<h2 style='color:#1E1E1E;'>Participants in {current} ({len(st.session_state['projects'][current])})</h2>", unsafe_allow_html=True)
+st.markdown(f"## Participants in {current} ({len(st.session_state['projects'][current])})")
 with st.expander("➕ Add New Participant"):
     with st.form("add_participant_form"):
         number = st.number_input("Participant #", min_value=1, value=len(st.session_state["projects"][current]) + 1)
@@ -170,72 +139,61 @@ with st.expander("➕ Add New Participant"):
         waist = st.text_input("Waist")
         dress_suit = st.text_input("Dress/Suit Size")
         role = st.text_input("Role/Status")
-        photo = st.file_uploader("Upload Picture", type=["png", "jpg", "jpeg"])
+        availability = st.date_input("Next Available Date", value=date.today())
+        photo = st.file_uploader("Upload Picture", type=["png","jpg","jpeg"])
         submitted = st.form_submit_button("Save")
         if submitted:
             participant = {
-                "number": number,
-                "name": name,
-                "age": age,
-                "agency": agency,
-                "height": height,
-                "waist": waist,
-                "dress_suit": dress_suit,
-                "role": role,
+                "number": number, "name": name, "age": age, "agency": agency,
+                "height": height, "waist": waist, "dress_suit": dress_suit,
+                "role": role, "availability": str(availability),
                 "photo": photo_to_b64(photo.read()) if photo else None
             }
             st.session_state["projects"][current].append(participant)
             save_data()
             st.success(f"✅ {name} added!")
-            st.rerun()
+            st.experimental_rerun()
 
 # ------------------------
-# Display participants
+# Display participants with availability
 # ------------------------
 project_data = st.session_state["projects"][current]
 cols = st.columns(3)
 for idx, p in enumerate(project_data):
     with cols[idx % 3]:
         color = role_color(p["role"] or "default")
-        st.markdown(f"""
-        <div class="card">
-            <h3>#{p.get("number", idx+1)} {p['name'] or 'Unnamed'}</h3>
-            <span class="role-tag" style="background-color:{color}">{p['role']}</span>
-        """, unsafe_allow_html=True)
+        st.markdown(f"<div class='card'><h3>#{p.get('number', idx+1)} {p['name'] or 'Unnamed'}</h3><span class='role-tag' style='background-color:{color}'>{p['role']}</span>", unsafe_allow_html=True)
 
-        # Photo
         if p["photo"]:
             image = Image.open(io.BytesIO(b64_to_photo(p["photo"])))
             st.image(image, width=150)
         else:
             st.image("https://via.placeholder.com/150?text=No+Photo", width=150)
 
-        # Details
         st.markdown(f"""
-        <div class="detail-row"><span class="detail-label">Age:</span> <span class="detail-value">{p['age']}</span></div>
-        <div class="detail-row"><span class="detail-label">Agency:</span> <span class="detail-value">{p['agency']}</span></div>
-        <div class="detail-row"><span class="detail-label">Height:</span> <span class="detail-value">{p['height']}</span></div>
-        <div class="detail-row"><span class="detail-label">Waist:</span> <span class="detail-value">{p['waist']}</span></div>
-        <div class="detail-row"><span class="detail-label">Dress/Suit:</span> <span class="detail-value">{p['dress_suit']}</span></div>
+        <div class='detail-row'><span class='detail-label'>Age:</span> <span class='detail-value'>{p['age']}</span></div>
+        <div class='detail-row'><span class='detail-label'>Agency:</span> <span class='detail-value'>{p['agency']}</span></div>
+        <div class='detail-row'><span class='detail-label'>Height:</span> <span class='detail-value'>{p['height']}</span></div>
+        <div class='detail-row'><span class='detail-label'>Waist:</span> <span class='detail-value'>{p['waist']}</span></div>
+        <div class='detail-row'><span class='detail-label'>Dress/Suit:</span> <span class='detail-value'>{p['dress_suit']}</span></div>
+        <div class='detail-row'><span class='detail-label'>Next Available:</span> <span class='detail-value'>{p['availability']}</span></div>
         """, unsafe_allow_html=True)
 
-        # Action buttons
         col1, col2 = st.columns(2)
         with col1:
             if st.button("✏️ Edit", key=f"edit_{idx}"):
                 st.session_state["editing"] = idx
-                st.rerun()
+                st.experimental_rerun()
         with col2:
             if st.button("🗑 Delete", key=f"delete_{idx}"):
                 st.session_state["projects"][current].pop(idx)
                 save_data()
                 st.warning("Deleted!")
-                st.rerun()
-
-        st.markdown("</div>", unsafe_allow_html=True)  # close card div
+                st.experimental_rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
 # ------------------------
-# Edit form (inline)
+# Edit participant inline
 # ------------------------
 if st.session_state["editing"] is not None:
     edit_idx = st.session_state["editing"]
@@ -251,20 +209,16 @@ if st.session_state["editing"] is not None:
             waist = st.text_input("Waist", value=p["waist"])
             dress_suit = st.text_input("Dress/Suit Size", value=p["dress_suit"])
             role = st.text_input("Role/Status", value=p["role"])
-            photo = st.file_uploader("Upload Picture (leave empty to keep current)", type=["png", "jpg", "jpeg"])
+            availability = st.date_input("Next Available Date", value=date.fromisoformat(p["availability"]))
+            photo = st.file_uploader("Upload Picture (leave empty to keep current)", type=["png","jpg","jpeg"])
             save_changes = st.form_submit_button("💾 Save Changes")
             cancel = st.form_submit_button("❌ Cancel")
 
             if save_changes:
                 p.update({
-                    "number": number,
-                    "name": name,
-                    "age": age,
-                    "agency": agency,
-                    "height": height,
-                    "waist": waist,
-                    "dress_suit": dress_suit,
-                    "role": role,
+                    "number": number, "name": name, "age": age, "agency": agency,
+                    "height": height, "waist": waist, "dress_suit": dress_suit,
+                    "role": role, "availability": str(availability)
                 })
                 if photo:
                     p["photo"] = photo_to_b64(photo.read())
@@ -272,15 +226,15 @@ if st.session_state["editing"] is not None:
                 save_data()
                 st.success("Updated successfully!")
                 st.session_state["editing"] = None
-                st.rerun()
+                st.experimental_rerun()
             elif cancel:
                 st.session_state["editing"] = None
-                st.rerun()
+                st.experimental_rerun()
 
 # ------------------------
 # Export to Word
 # ------------------------
-st.subheader("📄 Export Participants (Word - Apple Style)")
+st.subheader("📄 Export Participants")
 if st.button("Download Word File of current project"):
     if project_data:
         doc = Document()
@@ -303,7 +257,7 @@ if st.button("Download Word File of current project"):
             else:
                 row_cells[0].text = "No Photo"
 
-            info_text = f"Number: {p.get('number','')}\nName: {p['name'] or 'Unnamed'}\nRole: {p['role']}\nAge: {p['age']}\nAgency: {p['agency']}\nHeight: {p['height']}\nWaist: {p['waist']}\nDress/Suit: {p['dress_suit']}"
+            info_text = f"Number: {p.get('number','')}\nName: {p['name'] or 'Unnamed'}\nRole: {p['role']}\nAge: {p['age']}\nAgency: {p['agency']}\nHeight: {p['height']}\nWaist: {p['waist']}\nDress/Suit: {p['dress_suit']}\nNext Available: {p['availability']}"
             row_cells[1].text = info_text
             doc.add_paragraph("\n")
 

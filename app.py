@@ -1,3 +1,4 @@
+
 import streamlit as st
 from PIL import Image
 import io
@@ -90,6 +91,14 @@ def role_color(role):
     b = int(h[4:6], 16)
     return f"#{r:02X}{g:02X}{b:02X}"
 
+# --- Find next free number ---
+def next_free_number(participants):
+    used = {p["number"] for p in participants}
+    n = 1
+    while n in used:
+        n += 1
+    return n
+
 # --- Add participant ---
 st.markdown(f"<h2 style='color:#1E1E1E;'>Participants in {current}</h2>", unsafe_allow_html=True)
 with st.expander("➕ Add New Participant"):
@@ -104,7 +113,7 @@ with st.expander("➕ Add New Participant"):
         photo = st.file_uploader("Upload Picture", type=["png","jpg","jpeg"])
         submitted = st.form_submit_button("Save")
         if submitted:
-            number = len(st.session_state["projects"][current]) + 1  # Auto-numbering
+            number = next_free_number(st.session_state["projects"][current])  # Auto-suggest free number
             participant = {
                 "number": number,
                 "name": name,
@@ -122,6 +131,7 @@ with st.expander("➕ Add New Participant"):
 # --- Display participants with fade-in animation ---
 project_data = st.session_state["projects"][current]
 cols = st.columns(3)
+
 for idx, p in enumerate(project_data):
     with cols[idx % 3]:
         color = role_color(p["role"] or "default")
@@ -131,6 +141,7 @@ for idx, p in enumerate(project_data):
             <span class="role-tag" style="background-color:{color}">{p['role']}</span>
         </div>
         """, unsafe_allow_html=True)
+
         if p["photo"]:
             image = Image.open(io.BytesIO(p["photo"]))
             st.image(image, width=150)
@@ -142,6 +153,24 @@ for idx, p in enumerate(project_data):
         **Waist:** {p['waist']}  
         **Dress/Suit:** {p['dress_suit']}  
         """)
+
+        # Edit participant number
+        suggested = next_free_number(project_data)
+        new_num = st.number_input(
+            f"Edit Number for {p['name'] or 'Unnamed'}",
+            min_value=1,
+            step=1,
+            value=p["number"],
+            key=f"num_{current}_{idx}"
+        )
+        if new_num != p["number"]:
+            if st.button(f"Save new number for {p['name'] or 'Unnamed'}", key=f"save_num_{current}_{idx}"):
+                existing_nums = [x["number"] for x in project_data if x is not p]
+                if new_num in existing_nums:
+                    st.error(f"⚠️ Number {new_num} is already assigned to another participant.")
+                else:
+                    p["number"] = new_num
+                    st.success(f"✅ Updated number for {p['name'] or 'Unnamed'} to #{new_num}")
 
 # --- Word export ---
 st.subheader("📄 Export Participants (Word - Apple Style)")

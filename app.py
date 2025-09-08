@@ -261,4 +261,55 @@ if st.session_state["editing"] is not None:
                     "role": role, "availability": str(availability)
                 })
                 if photo:
-                    p["photo"] =
+                    p["photo"] = photo_to_b64(photo.read())
+                st.session_state["projects"][current][edit_idx] = p
+                save_data()
+                st.success("Updated successfully!")
+                st.session_state["editing"] = None
+                st.experimental_rerun()
+            elif cancel:
+                st.session_state["editing"] = None
+                st.experimental_rerun()
+
+# ------------------------
+# Export to Word
+# ------------------------
+st.subheader("📄 Export Participants")
+if st.button("Download Word File of current project"):
+    if project_data:
+        doc = Document()
+        doc.add_heading(f"Participants - {current}", 0)
+        for p in project_data:
+            table = doc.add_table(rows=1, cols=2)
+            table.autofit = False
+            table.columns[0].width = Inches(1.7)
+            table.columns[1].width = Inches(4.5)
+            row_cells = table.rows[0].cells
+
+            if p["photo"]:
+                image_stream = io.BytesIO(b64_to_photo(p["photo"]))
+                try:
+                    paragraph = row_cells[0].paragraphs[0]
+                    run = paragraph.add_run()
+                    run.add_picture(image_stream, width=Inches(1.5))
+                except:
+                    row_cells[0].text = "No Photo"
+            else:
+                row_cells[0].text = "No Photo"
+
+            info_text = f"Number: {p.get('number','')}\nName: {p['name'] or 'Unnamed'}\nRole: {p['role']}\nAge: {p['age']}\nAgency: {p['agency']}\nHeight: {p['height']}\nWaist: {p['waist']}\nDress/Suit: {p['dress_suit']}\nNext Available: {p['availability']}"
+            row_cells[1].text = info_text
+            doc.add_paragraph("\n")
+
+        word_stream = io.BytesIO()
+        doc.save(word_stream)
+        word_stream.seek(0)
+
+        st.download_button(
+            label="Click to download Word file",
+            data=word_stream,
+            file_name=f"{current}_participants.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    else:
+        st.info("No participants in this project yet.")

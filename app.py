@@ -111,7 +111,7 @@ if not st.session_state["logged_in"]:
                 st.success("Logged in as Admin ✅")
                 safe_rerun()
 
-            elif username in users and users[username]["password"] == hash_password(password):
+            elif username in users and isinstance(users[username], dict) and users[username]["password"] == hash_password(password):
                 st.session_state["logged_in"] = True
                 st.session_state["current_user"] = username
                 users[username]["last_login"] = datetime.now().isoformat()
@@ -159,13 +159,14 @@ else:
     # Projects
     st.sidebar.subheader("Projects")
     all_projects = list(data["projects"].keys())
-    selected_project = st.sidebar.selectbox("Select Project", all_projects, index=0 if all_projects else None)
-    if selected_project:
-        st.session_state["current_project"] = selected_project
-        if current_user in users:
-            if selected_project not in users[current_user]["projects_accessed"]:
-                users[current_user]["projects_accessed"].append(selected_project)
-                save_users(users)
+    if all_projects:
+        selected_project = st.sidebar.selectbox("Select Project", all_projects, index=0)
+        if selected_project:
+            st.session_state["current_project"] = selected_project
+            if current_user in users and isinstance(users[current_user], dict):
+                if selected_project not in users[current_user]["projects_accessed"]:
+                    users[current_user]["projects_accessed"].append(selected_project)
+                    save_users(users)
 
     new_proj = st.sidebar.text_input("Create New Project")
     if st.sidebar.button("Add Project") and new_proj:
@@ -190,9 +191,13 @@ else:
             st.subheader("All Users")
             if users:
                 for uname, info in list(users.items()):
+                    if not isinstance(info, dict):
+                        continue  # skip invalid entries
+
                     if uname == "admin":
                         st.markdown(f"**{uname}** (built-in Admin)")
                         continue
+
                     col1, col2, col3, col4, col5 = st.columns([2,2,3,3,1])
                     col1.write(uname)
                     col2.write(info.get("role", ""))
@@ -301,7 +306,17 @@ else:
                 else:
                     row_cells[0].text = "No Photo"
 
-                info_text = f"Number: {p.get('number','')}\nName: {p['name']}\nRole: {p['role']}\nAge: {p['age']}\nAgency: {p['agency']}\nHeight: {p['height']}\nWaist: {p['waist']}\nDress/Suit: {p['dress_suit']}\nNext Available: {p['availability']}"
+                info_text = (
+                    f"Number: {p.get('number','')}\n"
+                    f"Name: {p['name']}\n"
+                    f"Role: {p['role']}\n"
+                    f"Age: {p['age']}\n"
+                    f"Agency: {p['agency']}\n"
+                    f"Height: {p['height']}\n"
+                    f"Waist: {p['waist']}\n"
+                    f"Dress/Suit: {p['dress_suit']}\n"
+                    f"Next Available: {p['availability']}"
+                )
                 row_cells[1].text = info_text
                 doc.add_paragraph("\n")
 

@@ -4,7 +4,6 @@ import io
 from docx import Document
 from docx.shared import Inches
 import hashlib
-import time
 
 # --- Page setup ---
 st.set_page_config(page_title="🎬 Movie Casting Manager", layout="wide")
@@ -57,8 +56,6 @@ project_names = list(st.session_state["projects"].keys())
 selected_project = st.sidebar.selectbox(
     "Select Project", project_names, index=project_names.index(st.session_state["current_project"])
 )
-
-# Update current project (no rerun needed)
 st.session_state["current_project"] = selected_project
 current = st.session_state["current_project"]
 
@@ -107,7 +104,9 @@ with st.expander("➕ Add New Participant"):
         photo = st.file_uploader("Upload Picture", type=["png","jpg","jpeg"])
         submitted = st.form_submit_button("Save")
         if submitted:
+            number = len(st.session_state["projects"][current]) + 1  # Auto-numbering
             participant = {
+                "number": number,
                 "name": name,
                 "age": age,
                 "agency": agency,
@@ -118,7 +117,7 @@ with st.expander("➕ Add New Participant"):
                 "photo": photo.read() if photo else None
             }
             st.session_state["projects"][current].append(participant)
-            st.success(f"✅ {name} added!")
+            st.success(f"✅ {name} added as Participant #{number}!")
 
 # --- Display participants with fade-in animation ---
 project_data = st.session_state["projects"][current]
@@ -128,7 +127,7 @@ for idx, p in enumerate(project_data):
         color = role_color(p["role"] or "default")
         st.markdown(f"""
         <div class="card visible">
-            <h3 style="margin-bottom:5px;">{p['name'] or 'Unnamed'}</h3>
+            <h3 style="margin-bottom:5px;">#{p['number']} - {p['name'] or 'Unnamed'}</h3>
             <span class="role-tag" style="background-color:{color}">{p['role']}</span>
         </div>
         """, unsafe_allow_html=True)
@@ -169,7 +168,7 @@ if st.button("Download Word File of current project"):
             else:
                 row_cells[0].text = "No Photo"
 
-            info_text = f"Name: {p['name'] or 'Unnamed'}\nRole: {p['role']}\nAge: {p['age']}\nAgency: {p['agency']}\nHeight: {p['height']}\nWaist: {p['waist']}\nDress/Suit: {p['dress_suit']}"
+            info_text = f"#{p['number']} - {p['name'] or 'Unnamed'}\nRole: {p['role']}\nAge: {p['age']}\nAgency: {p['agency']}\nHeight: {p['height']}\nWaist: {p['waist']}\nDress/Suit: {p['dress_suit']}"
             row_cells[1].text = info_text
             doc.add_paragraph("\n")
 

@@ -4,6 +4,22 @@ import io
 from docx import Document
 from docx.shared import Inches
 import hashlib
+import json
+import os
+
+# --- File for persistence ---
+DATA_FILE = "projects_data.json"
+
+# --- Load / Save ---
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"Default Project": []}
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # --- Page setup ---
 st.set_page_config(page_title="🎬 Movie Casting Manager", layout="wide")
@@ -11,7 +27,7 @@ st.set_page_config(page_title="🎬 Movie Casting Manager", layout="wide")
 # --- CSS ---
 st.markdown("""
 <style>
-body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #F8F9FA; }
+body { font-family: 'Inter', sans-serif; background-color: #F8F9FA; }
 .card {
     background-color:#FFFFFF;
     border-radius:20px;
@@ -20,26 +36,18 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Robo
     box-shadow:0 6px 15px rgba(0,0,0,0.08);
     transition: all 0.3s ease-out;
 }
-.card:hover {
-    transform: translateY(-5px);
-    box-shadow:0 12px 28px rgba(0,0,0,0.12);
-}
+.card:hover { transform: translateY(-5px); box-shadow:0 12px 28px rgba(0,0,0,0.12); }
 .role-tag {
-    color:white;
-    padding:3px 8px;
-    border-radius:10px;
-    font-size:12px;
-    font-weight:500;
-    display:inline-block;
+    color:white; padding:3px 8px; border-radius:10px;
+    font-size:12px; font-weight:500; display:inline-block;
 }
 .details { font-size: 13px; color: #333; margin-top: 8px; }
-.card-actions { margin-top: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- Session state ---
+# --- Session state init ---
 if "projects" not in st.session_state:
-    st.session_state["projects"] = {"Default Project": []}
+    st.session_state["projects"] = load_data()
 if "current_project" not in st.session_state:
     st.session_state["current_project"] = "Default Project"
 
@@ -58,6 +66,9 @@ def next_free_number(participants):
         n += 1
     return n
 
+def persist():
+    save_data(st.session_state["projects"])
+
 # --- Sidebar Project Manager ---
 st.sidebar.header("📂 Project Manager")
 project_names = list(st.session_state["projects"].keys())
@@ -74,6 +85,7 @@ with st.sidebar.expander("➕ Create Project"):
         if new_proj and new_proj not in st.session_state["projects"]:
             st.session_state["projects"][new_proj] = []
             st.session_state["current_project"] = new_proj
+            persist()
             st.success(f"Project '{new_proj}' added!")
             st.rerun()
 
@@ -84,16 +96,18 @@ with st.sidebar.expander("⚙️ Manage Project"):
         if rename_proj and rename_proj not in st.session_state["projects"]:
             st.session_state["projects"][rename_proj] = st.session_state["projects"].pop(current)
             st.session_state["current_project"] = rename_proj
+            persist()
             st.success(f"Renamed to '{rename_proj}'")
             st.rerun()
     if st.button("🗑 Delete Project"):
         if current in st.session_state["projects"] and len(st.session_state["projects"]) > 1:
             st.session_state["projects"].pop(current)
             st.session_state["current_project"] = list(st.session_state["projects"].keys())[0]
+            persist()
             st.warning(f"Deleted '{current}'")
             st.rerun()
 
-# --- Sidebar: Add/Edit Participant ---
+# --- Sidebar: Add Participant ---
 st.sidebar.subheader(f"➕ Add New Participant to {current}")
 with st.sidebar.form("add_participant_form"):
     name = st.text_input("Name")
@@ -119,15 +133,25 @@ with st.sidebar.form("add_participant_form"):
             "photo": photo.read() if photo else None
         }
         st.session_state["projects"][current].append(participant)
+        persist()
         st.success(f"✅ {name} added as Participant #{number}!")
         st.rerun()
 
-# --- Main Area: Participant Cards ---
-st.markdown(f"<h2 style='color:#1E1E1E;'>Participants in {current}</h2>", unsafe_allow_html=True)
+# --- Search bar ---
+st.markdown(f"<h2>Participants in {current}</h2>", unsafe_allow_html=True)
+search = st.text_input("🔍 Search by name or role")
 project_data = st.session_state["projects"][current]
 
+if search:
+    project_data = [
+        p for p in project_data
+        if search.lower() in (p["name"] or "").lower()
+        or search.lower() in (p["role"] or "").lower()
+    ]
+
+# --- Main Area: Participant Cards ---
 cols = st.columns(3)
-for idx, p in enumerate(project_data):
+for idx, p in enumerate(sorted(project_data, key=lambda x: x["number"])):
     with cols[idx % 3]:
         color = role_color(p["role"] or "default")
         st.markdown(f"""
@@ -151,26 +175,27 @@ for idx, p in enumerate(project_data):
         </div>
         """, unsafe_allow_html=True)
 
-        # Actions: Edit number + Delete
+        # Edit number
         new_num = st.number_input(
             f"Number for {p['name'] or 'Unnamed'}",
-            min_value=1,
-            step=1,
-            value=p["number"],
-            key=f"num_{current}_{idx}"
+            min_value=1, step=1,
+            value=p["number"], key=f"num_{current}_{idx}"
         )
         if new_num != p["number"]:
             if st.button(f"Save #{new_num}", key=f"save_num_{current}_{idx}"):
-                existing_nums = [x["number"] for x in project_data if x is not p]
-                if new_num in existing_nums:
+                existing = [x["number"] for x in st.session_state["projects"][current] if x is not p]
+                if new_num in existing:
                     st.error(f"⚠️ Number {new_num} is already taken.")
                 else:
                     p["number"] = new_num
+                    persist()
                     st.success(f"✅ Updated number for {p['name']} to #{new_num}")
                     st.rerun()
 
+        # Delete
         if st.button(f"🗑 Delete {p['name'] or 'Unnamed'}", key=f"del_{current}_{idx}"):
-            project_data.remove(p)
+            st.session_state["projects"][current].remove(p)
+            persist()
             st.warning(f"Deleted {p['name'] or 'Unnamed'}")
             st.rerun()
 
@@ -182,7 +207,6 @@ if st.button("Download Word File of current project"):
         doc.add_heading(f"Participants - {current}", 0)
         for p in sorted(project_data, key=lambda x: x["number"]):
             table = doc.add_table(rows=1, cols=2)
-            table.autofit = False
             table.columns[0].width = Inches(1.7)
             table.columns[1].width = Inches(4.5)
             row_cells = table.rows[0].cells
@@ -191,9 +215,7 @@ if st.button("Download Word File of current project"):
                 from io import BytesIO
                 image_stream = BytesIO(p['photo'])
                 try:
-                    paragraph = row_cells[0].paragraphs[0]
-                    run = paragraph.add_run()
-                    run.add_picture(image_stream, width=Inches(1.5))
+                    row_cells[0].paragraphs[0].add_run().add_picture(image_stream, width=Inches(1.5))
                 except:
                     row_cells[0].text = "No Photo"
             else:

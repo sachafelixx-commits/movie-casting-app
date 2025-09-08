@@ -54,6 +54,12 @@ def role_color(role):
     b = int(h[4:6], 16)
     return f"#{r:02X}{g:02X}{b:02X}"
 
+def safe_rerun():
+    try:
+        st.experimental_rerun()
+    except:
+        pass
+
 # ------------------------
 # Streamlit page setup
 # ------------------------
@@ -94,13 +100,13 @@ if st.session_state["page"] == "auth":
                 st.session_state["logged_in"] = True
                 st.session_state["page"] = "main"
                 st.success("Login successful!")
-                st.experimental_rerun()
+                safe_rerun()
             else:
                 st.error("Invalid credentials")
         st.write("Don't have an account? Switch to Sign Up below.")
         if st.button("Switch to Sign Up"):
             st.session_state["auth_mode"] = "signup"
-            st.experimental_rerun()
+            safe_rerun()
     else:
         st.subheader("Sign Up")
         new_user = st.text_input("Choose a Username")
@@ -113,12 +119,12 @@ if st.session_state["page"] == "auth":
                 save_users(users)
                 st.success("Sign up successful! You can now log in.")
                 st.session_state["auth_mode"] = "login"
-                st.experimental_rerun()
+                safe_rerun()
             else:
                 st.warning("Enter both username and password")
         if st.button("Switch to Login"):
             st.session_state["auth_mode"] = "login"
-            st.experimental_rerun()
+            safe_rerun()
     st.stop()
 
 # ------------------------
@@ -128,7 +134,7 @@ if not st.session_state["logged_in"]:
     st.stop()
 
 # ------------------------
-# Sidebar: project manager
+# Sidebar: Project Manager
 # ------------------------
 st.sidebar.header("📂 Project Manager")
 project_names = list(st.session_state["projects"].keys())
@@ -146,7 +152,7 @@ with st.sidebar.expander("➕ Create Project"):
             st.session_state["current_project"] = new_proj
             save_data()
             st.success(f"Project '{new_proj}' added!")
-            st.experimental_rerun()
+            safe_rerun()
 
 with st.sidebar.expander("⚙️ Manage Project"):
     rename_proj = st.text_input("Rename Project", value=current)
@@ -156,17 +162,17 @@ with st.sidebar.expander("⚙️ Manage Project"):
             st.session_state["current_project"] = rename_proj
             save_data()
             st.success(f"Renamed to '{rename_proj}'")
-            st.experimental_rerun()
+            safe_rerun()
     if st.button("🗑 Delete Project"):
         if current in st.session_state["projects"] and len(st.session_state["projects"]) > 1:
             st.session_state["projects"].pop(current)
             st.session_state["current_project"] = list(st.session_state["projects"].keys())[0]
             save_data()
             st.warning(f"Deleted '{current}'")
-            st.experimental_rerun()
+            safe_rerun()
 
 # ------------------------
-# Add participant
+# Add New Participant
 # ------------------------
 st.markdown(f"## Participants in {current} ({len(st.session_state['projects'][current])})")
 with st.expander("➕ Add New Participant"):
@@ -192,10 +198,10 @@ with st.expander("➕ Add New Participant"):
             st.session_state["projects"][current].append(participant)
             save_data()
             st.success(f"✅ {name} added!")
-            st.experimental_rerun()
+            safe_rerun()
 
 # ------------------------
-# Display participants
+# Display Participants
 # ------------------------
 project_data = st.session_state["projects"][current]
 cols = st.columns(3)
@@ -223,17 +229,17 @@ for idx, p in enumerate(project_data):
         with col1:
             if st.button("✏️ Edit", key=f"edit_{idx}"):
                 st.session_state["editing"] = idx
-                st.experimental_rerun()
+                safe_rerun()
         with col2:
             if st.button("🗑 Delete", key=f"delete_{idx}"):
                 st.session_state["projects"][current].pop(idx)
                 save_data()
                 st.warning("Deleted!")
-                st.experimental_rerun()
+                safe_rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
 # ------------------------
-# Edit participant
+# Edit Participant
 # ------------------------
 if st.session_state["editing"] is not None:
     edit_idx = st.session_state["editing"]
@@ -266,10 +272,10 @@ if st.session_state["editing"] is not None:
                 save_data()
                 st.success("Updated successfully!")
                 st.session_state["editing"] = None
-                st.experimental_rerun()
+                safe_rerun()
             elif cancel:
                 st.session_state["editing"] = None
-                st.experimental_rerun()
+                safe_rerun()
 
 # ------------------------
 # Export to Word
@@ -321,3 +327,4 @@ Next Available: {p['availability']}"""
         )
     else:
         st.info("No participants in this project yet.")
+

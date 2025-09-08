@@ -1,4 +1,7 @@
 import streamlit as st
+st.write("✅ Streamlit version:", st.__version__)
+
+import streamlit as st
 from PIL import Image, ImageOps
 import io
 from docx import Document

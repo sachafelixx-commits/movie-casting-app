@@ -81,6 +81,22 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ------------------------
+# Welcome Page
+# ------------------------
+if "page" not in st.session_state:
+    st.session_state["page"] = "welcome"
+
+if st.session_state["page"] == "welcome":
+    st.image("https://media.giphy.com/media/3o6ZsW0lMJ01aJxVRC/giphy.gif", width=200)
+    st.title("🎬 Welcome to Movie Casting Manager")
+    st.markdown("""
+    Manage your casting projects efficiently. Add participants, edit details, and export to Word effortlessly.
+    """)
+    if st.button("➡️ Go to App"):
+        st.session_state["page"] = "main"
+    st.stop()
+
+# ------------------------
 # Load / init session state
 # ------------------------
 if "projects" not in st.session_state:
@@ -143,7 +159,7 @@ def role_color(role):
 # ------------------------
 # Add participant
 # ------------------------
-st.markdown(f"<h2 style='color:#1E1E1E;'>Participants in {current}</h2>", unsafe_allow_html=True)
+st.markdown(f"<h2 style='color:#1E1E1E;'>Participants in {current} ({len(st.session_state['projects'][current])})</h2>", unsafe_allow_html=True)
 with st.expander("➕ Add New Participant"):
     with st.form("add_participant_form"):
         number = st.number_input("Participant #", min_value=1, value=len(st.session_state["projects"][current]) + 1)
@@ -191,6 +207,8 @@ for idx, p in enumerate(project_data):
         if p["photo"]:
             image = Image.open(io.BytesIO(b64_to_photo(p["photo"])))
             st.image(image, width=150)
+        else:
+            st.image("https://via.placeholder.com/150?text=No+Photo", width=150)
 
         # Details
         st.markdown(f"""

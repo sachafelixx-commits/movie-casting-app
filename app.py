@@ -73,7 +73,7 @@ st.markdown("""
 # Initialize session state
 # ------------------------
 if "page" not in st.session_state: st.session_state["page"] = "auth"
-if "auth_mode" not in st.session_state: st.session_state["auth_mode"] = "login"  # login or signup
+if "auth_mode" not in st.session_state: st.session_state["auth_mode"] = "login"
 if "logged_in" not in st.session_state: st.session_state["logged_in"] = False
 if "projects" not in st.session_state: st.session_state["projects"] = load_data()
 if "current_project" not in st.session_state: st.session_state["current_project"] = "Default Project"
@@ -195,7 +195,7 @@ with st.expander("➕ Add New Participant"):
             st.experimental_rerun()
 
 # ------------------------
-# Display participants with availability
+# Display participants
 # ------------------------
 project_data = st.session_state["projects"][current]
 cols = st.columns(3)
@@ -233,7 +233,7 @@ for idx, p in enumerate(project_data):
         st.markdown("</div>", unsafe_allow_html=True)
 
 # ------------------------
-# Edit participant inline
+# Edit participant
 # ------------------------
 if st.session_state["editing"] is not None:
     edit_idx = st.session_state["editing"]
@@ -289,4 +289,35 @@ if st.button("Download Word File of current project"):
             if p["photo"]:
                 image_stream = io.BytesIO(b64_to_photo(p["photo"]))
                 try:
-                    paragraph = row
+                    paragraph = row_cells[0].paragraphs[0]
+                    run = paragraph.add_run()
+                    run.add_picture(image_stream, width=Inches(1.5))
+                except:
+                    row_cells[0].text = "No Photo"
+            else:
+                row_cells[0].text = "No Photo"
+
+            info_text = f"""Number: {p.get('number','')}
+Name: {p['name'] or 'Unnamed'}
+Role: {p['role']}
+Age: {p['age']}
+Agency: {p['agency']}
+Height: {p['height']}
+Waist: {p['waist']}
+Dress/Suit: {p['dress_suit']}
+Next Available: {p['availability']}"""
+            row_cells[1].text = info_text
+            doc.add_paragraph("\n")
+
+        word_stream = io.BytesIO()
+        doc.save(word_stream)
+        word_stream.seek(0)
+
+        st.download_button(
+            label="Click to download Word file",
+            data=word_stream,
+            file_name=f"{current}_participants.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    else:
+        st.info("No participants in this project yet.")

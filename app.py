@@ -73,7 +73,6 @@ if not st.session_state.logged_in:
     password = st.text_input("Password", type="password")
 
     if st.button("Login"):
-        # Special Admin login
         if username == "admin" and password == "supersecret":
             st.session_state.logged_in = True
             st.session_state.current_user = "admin"
@@ -124,73 +123,52 @@ else:
         st.session_state.current_user = None
         safe_rerun()
 
-    # -----------------------
-    # Admin Dashboard
-    # -----------------------
     if current_user == "admin" or users.get(current_user, {}).get("role") == "Admin":
         st.sidebar.subheader("Admin Dashboard")
         st.sidebar.write("Manage accounts and view logs")
         if st.sidebar.checkbox("Show Admin Dashboard"):
             st.header("👑 Admin Dashboard")
-
-            # Show all users
             st.subheader("All Users")
-            if users:
-                for uname, info in list(users.items()):
-                    if not isinstance(info, dict):
-                        continue
+            for uname, info in list(users.items()):
+                if uname == "admin":
+                    st.markdown(f"**{uname}** (built-in Admin)")
+                    continue
 
-                    if uname == "admin":
-                        st.markdown(f"**{uname}** (built-in Admin)")
-                        continue
+                col1, col2, col3, col4, col5, col6 = st.columns([2,2,3,3,1,1])
+                col1.write(uname)
+                col2.write(info.get("role", ""))
+                col3.write(info.get("last_login", ""))
+                col4.write(", ".join(info.get("projects_accessed", [])))
+                if col5.button("❌", key=f"deluser_{uname}"):
+                    users.pop(uname)
+                    save_users(users)
+                    st.warning(f"User {uname} deleted.")
+                    log_action(current_user, "delete_user", uname)
+                    safe_rerun()
+                if col6.button("✏️", key=f"edituser_{uname}"):
+                    st.session_state["editing_user"] = uname
+                    safe_rerun()
 
-                    col1, col2, col3, col4, col5, col6 = st.columns([2,2,3,3,1,1])
-                    col1.write(uname)
-                    col2.write(info.get("role", ""))
-                    col3.write(info.get("last_login", ""))
-                    col4.write(", ".join(info.get("projects_accessed", [])))
-                    if col5.button("❌", key=f"deluser_{uname}"):
-                        users.pop(uname)
-                        save_users(users)
-                        st.warning(f"User {uname} deleted.")
-                        log_action(current_user, "delete_user", uname)
-                        safe_rerun()
+            if "editing_user" in st.session_state:
+                edit_name = st.session_state["editing_user"]
+                info = users.get(edit_name, {})
+                st.markdown(f"### Edit User: {edit_name}")
+                new_role = st.selectbox("Role", ["Admin", "Casting Director", "Assistant"],
+                                        index=["Admin","Casting Director","Assistant"].index(info.get("role","Assistant")))
+                new_pass = st.text_input("New Password (leave blank to keep)", type="password")
+                if st.button("Save Changes"):
+                    users[edit_name]["role"] = new_role
+                    if new_pass:
+                        users[edit_name]["password"] = hash_password(new_pass)
+                    save_users(users)
+                    st.success(f"Updated {edit_name}")
+                    log_action(current_user, "edit_user", edit_name)
+                    del st.session_state["editing_user"]
+                    safe_rerun()
+                if st.button("Cancel Edit"):
+                    del st.session_state["editing_user"]
+                    safe_rerun()
 
-                    if col6.button("✏️", key=f"edituser_{uname}"):
-                        st.session_state["editing_user"] = uname
-                        safe_rerun()
-
-                # Edit user form
-                if "editing_user" in st.session_state:
-                    edit_name = st.session_state["editing_user"]
-                    info = users.get(edit_name, {})
-                    st.markdown(f"### Edit User: {edit_name}")
-                    new_role = st.selectbox("Role", ["Admin", "Casting Director", "Assistant"],
-                                            index=["Admin","Casting Director","Assistant"].index(info.get("role","Assistant")))
-                    new_pass = st.text_input("New Password (leave blank to keep)", type="password")
-                    if st.button("Save Changes"):
-                        users[edit_name]["role"] = new_role
-                        if new_pass:
-                            users[edit_name]["password"] = hash_password(new_pass)
-                        save_users(users)
-                        st.success(f"Updated {edit_name}")
-                        log_action(current_user, "edit_user", edit_name)
-                        del st.session_state["editing_user"]
-                        safe_rerun()
-                    if st.button("Cancel Edit"):
-                        del st.session_state["editing_user"]
-                        safe_rerun()
-
-            else:
-                st.info("No users yet.")
-
-            st.subheader("Recent Activity Logs")
-            for log in st.session_state.get("logs", [])[-20:]:
-                st.write(log)
-
-    # -----------------------
-    # Project Management
-    # -----------------------
     st.sidebar.header("Projects")
     current = st.sidebar.selectbox("Select Project", list(projects.keys()))
     project_data = projects[current]
@@ -206,9 +184,6 @@ else:
             log_action(current_user, "create_project", new_project)
             safe_rerun()
 
-    # -----------------------
-    # Participant Management
-    # -----------------------
     st.header(f"Participants for {current}")
 
     with st.expander("➕ Add New Participant"):
@@ -238,7 +213,6 @@ else:
                 st.success("Participant added!")
                 safe_rerun()
 
-    # Show participants
     for i, p in enumerate(project_data):
         with st.container():
             cols = st.columns([1,3,2,2,2,2,2,2,1,1])
@@ -260,7 +234,6 @@ else:
                 st.session_state["editing"] = i
                 safe_rerun()
 
-        # Edit form
         if st.session_state.get("editing") == i:
             with st.form(f"edit_{i}_form"):
                 name = st.text_input("Name", p["name"])
@@ -289,9 +262,6 @@ else:
                     st.session_state["editing"] = None
                     safe_rerun()
 
-    # -----------------------
-    # Export to Word
-    # -----------------------
     st.subheader("📄 Export Participants (Word)")
     if st.button("Download Word File of Current Project"):
         if project_data:
@@ -312,16 +282,28 @@ else:
                 else:
                     row_cells[0].text = "No Photo"
 
-info_text = (
-    f"Number: {p.get('number','')}\n"
-    f"Name: {p.get('name','')}\n"
-    f"Role: {p.get('role','')}\n"
-    f"Age: {p.get('age','')}\n"
-    f"Agency: {p.get('agency','')}\n"
-    f"Height: {p.get('height','')}\n"
-    f"Waist: {p.get('waist','')}\n"
-    f"Dress/Suit: {p.get('dress_suit','')}\n"
-    f"Next Available: {p.get('availability','')}"
-)
+                info_text = (
+                    f"Number: {p.get('number','')}\n"
+                    f"Name: {p.get('name','')}\n"
+                    f"Role: {p.get('role','')}\n"
+                    f"Age: {p.get('age','')}\n"
+                    f"Agency: {p.get('agency','')}\n"
+                    f"Height: {p.get('height','')}\n"
+                    f"Waist: {p.get('waist','')}\n"
+                    f"Dress/Suit: {p.get('dress_suit','')}\n"
+                    f"Next Available: {p.get('availability','')}"
+                )
 
+                row_cells[1].text = info_text
+                doc.add_paragraph("\n")
 
+            word_stream = io.BytesIO()
+            doc.save(word_stream)
+            word_stream.seek(0)
+
+            st.download_button(
+                label="Click to download Word file",
+                data=word_stream,
+                file_name=f"{current}_participants.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )

@@ -1,4 +1,3 @@
-
 import streamlit as st
 import json, os, io, base64
 from datetime import datetime
@@ -8,7 +7,7 @@ from PIL import Image
 import hashlib
 
 # ========================
-# Page Config
+# Page Config (set once)
 # ========================
 st.set_page_config(page_title="Sacha's Casting Manager", layout="wide")
 
@@ -16,6 +15,8 @@ st.set_page_config(page_title="Sacha's Casting Manager", layout="wide")
 # Files & Constants
 # ========================
 USERS_FILE = "users.json"
+DATA_FILE = "casting_data.json"
+LOG_FILE = "logs.json"
 DEFAULT_PROJECT_NAME = "Default Project"
 
 # ========================
@@ -47,15 +48,49 @@ def _default_project_block():
         "participants": []
     }
 
+def load_data():
+    raw = load_json(DATA_FILE, {"projects": {}})
+    projects = raw.get("projects", {})
+
+    if not projects:
+        projects[DEFAULT_PROJECT_NAME] = _default_project_block()
+        return {"projects": projects}
+
+    changed = False
+    for name, block in list(projects.items()):
+        if isinstance(block, list):
+            projects[name] = {
+                "description": "",
+                "created_at": datetime.now().isoformat(),
+                "participants": block,
+            }
+            changed = True
+        elif isinstance(block, dict) and "participants" not in block:
+            projects[name]["participants"] = []
+            changed = True
+    data = {"projects": projects}
+    if changed:
+        save_data(data)
+    return data
+
+def save_data(data):
+    save_json(DATA_FILE, data)
+
+def load_logs():
+    return load_json(LOG_FILE, [])
+
+def save_logs(logs):
+    save_json(LOG_FILE, logs)
+
 def log_action(user, action, details=""):
-    logs = load_json("logs.json", [])
+    logs = load_logs()
     logs.append({
         "timestamp": datetime.now().isoformat(),
         "user": user,
         "action": action,
         "details": details
     })
-    save_json("logs.json", logs)
+    save_logs(logs)
 
 def photo_to_b64(file):
     return base64.b64encode(file.read()).decode("utf-8")
@@ -89,8 +124,17 @@ if "confirm_delete_project" not in st.session_state:
     st.session_state["confirm_delete_project"] = None
 if "editing_project" not in st.session_state:
     st.session_state["editing_project"] = None
+if "editing_participant" not in st.session_state:
+    st.session_state["editing_participant"] = None
 
 users = load_users()
+data = load_data()
+
+# Ensure active project exists
+projects = data["projects"]
+if st.session_state["current_project"] not in projects:
+    projects[st.session_state["current_project"]] = _default_project_block()
+    save_data(data)
 
 # ========================
 # Auth Screens
@@ -106,27 +150,27 @@ if not st.session_state["logged_in"]:
         login_btn = st.button("Login")
 
         if login_btn:
+            # Built-in Admin backdoor
             if username == "admin" and password == "supersecret":
                 st.session_state["logged_in"] = True
                 st.session_state["current_user"] = "admin"
-                if "admin" not in users:
-                    users["admin"] = {
-                        "password": hash_password(password),
-                        "role": "Admin",
-                        "projects": {DEFAULT_PROJECT_NAME: _default_project_block()},
-                        "last_login": datetime.now().isoformat()
-                    }
-                    save_users(users)
+                users = load_users()
+                users["admin"] = {
+                    "password": hash_password(password),
+                    "role": "Admin",
+                    "last_login": datetime.now().isoformat(),
+                    "projects_accessed": []
+                }
+                save_users(users)
                 log_action("admin", "login")
                 st.success("Logged in as Admin ✅")
                 safe_rerun()
 
-            if username in users and users[username]["password"] == hash_password(password):
+            users = load_users()  # always reload
+            if username in users and isinstance(users[username], dict) and users[username]["password"] == hash_password(password):
                 st.session_state["logged_in"] = True
                 st.session_state["current_user"] = username
                 users[username]["last_login"] = datetime.now().isoformat()
-                if "projects" not in users[username]:
-                    users[username]["projects"] = {DEFAULT_PROJECT_NAME: _default_project_block()}
                 save_users(users)
                 log_action(username, "login")
                 st.success(f"Welcome back {username}!")
@@ -135,9 +179,10 @@ if not st.session_state["logged_in"]:
                 st.error("Invalid credentials")
 
     else:  # Sign Up
+        users = load_users()  # reload fresh
         new_user = st.text_input("New Username")
         new_pass = st.text_input("New Password", type="password")
-        role = st.selectbox("Role", ["Casting Director", "Assistant"])
+        role = st.selectbox("Role", ["Casting Director", "Assistant"])  # Admin only via special login
         signup_btn = st.button("Sign Up")
 
         if signup_btn:
@@ -149,8 +194,9 @@ if not st.session_state["logged_in"]:
                 users[new_user] = {
                     "password": hash_password(new_pass),
                     "role": role,
-                    "projects": {DEFAULT_PROJECT_NAME: _default_project_block()},
-                    "last_login": datetime.now().isoformat()
+                    "last_login": datetime.now().isoformat(),
+                    "projects_accessed": [],
+                    "projects": {}  # Each user gets own project dict
                 }
                 save_users(users)
                 st.success("Account created! Please log in.")
@@ -161,12 +207,14 @@ if not st.session_state["logged_in"]:
 # ========================
 else:
     current_user = st.session_state["current_user"]
-    user_data = users[current_user]
-    role = user_data.get("role", "Casting Director")
-    projects = user_data.get("projects", {})
 
+    # Sidebar
     st.sidebar.title("Menu")
     st.sidebar.write(f"Logged in as: **{current_user}**")
+
+    # Reload users to get latest roles
+    users = load_users()
+    role = users.get(current_user, {}).get("role", "Casting Director")
 
     if st.sidebar.button("Logout"):
         st.session_state["logged_in"] = False
@@ -174,16 +222,27 @@ else:
         st.session_state["page"] = "login"
         safe_rerun()
 
+    # Modes
     st.sidebar.subheader("Modes")
     st.session_state["participant_mode"] = st.sidebar.toggle(
         "Enable Participant Mode (Kiosk)",
         value=st.session_state["participant_mode"]
     )
 
+    # Active Project Display in Sidebar
     st.sidebar.markdown("---")
     st.sidebar.subheader("Active Project")
     active = st.session_state["current_project"]
     st.sidebar.write(f"**{active}**")
+
+    # Initialize per-user projects if not present
+    if "projects" not in users[current_user]:
+        users[current_user]["projects"] = {}
+    user_projects = users[current_user]["projects"]
+
+    if active not in user_projects:
+        user_projects[active] = _default_project_block()
+        save_users(users)
 
     # ===== Participant Mode =====
     if st.session_state["participant_mode"]:
@@ -205,7 +264,7 @@ else:
             submitted = st.form_submit_button("Submit")
 
             if submitted:
-                proj_block = projects.get(active, _default_project_block())
+                proj_block = user_projects.get(active)
                 participants = proj_block.get("participants", [])
                 entry = {
                     "number": number,
@@ -220,9 +279,7 @@ else:
                     "photo": photo_to_b64(photo) if photo else None
                 }
                 participants.append(entry)
-                proj_block["participants"] = participants
-                projects[active] = proj_block
-                users[current_user]["projects"] = projects
+                user_projects[active]["participants"] = participants
                 save_users(users)
                 st.success("✅ Thanks for checking in! Next participant may proceed.")
                 log_action(current_user, "participant_checkin", name)
@@ -246,6 +303,7 @@ else:
                 index=0
             )
 
+        # Create Project
         with st.expander("➕ Create New Project", expanded=False):
             with st.form("new_project_form"):
                 p_name = st.text_input("Project Name")
@@ -254,28 +312,26 @@ else:
                 if create_btn:
                     if not p_name:
                         st.error("Please provide a project name.")
-                    elif p_name in projects:
+                    elif p_name in user_projects:
                         st.error("A project with this name already exists.")
                     else:
-                        projects[p_name] = {
+                        user_projects[p_name] = {
                             "description": p_desc or "",
                             "created_at": datetime.now().isoformat(),
                             "participants": []
                         }
-                        users[current_user]["projects"] = projects
                         save_users(users)
                         log_action(current_user, "create_project", p_name)
                         st.success(f"Project '{p_name}' created.")
                         st.session_state["current_project"] = p_name
                         safe_rerun()
-
-        # Render projects
+        # Prepare filtered/sorted list
         def proj_meta_tuple(name, block):
             count = len(block.get("participants", []))
             created = block.get("created_at", datetime.now().isoformat())
             return name, block.get("description", ""), created, count
 
-        proj_items = [proj_meta_tuple(n, b) for n, b in projects.items()]
+        proj_items = [proj_meta_tuple(n, b) for n, b in user_projects.items()]
         if query:
             q = query.lower().strip()
             proj_items = [x for x in proj_items if q in x[0].lower() or q in (x[1] or "").lower()]
@@ -311,6 +367,8 @@ else:
             a1, a2, a3 = cols[4].columns([1, 1, 1])
             if a1.button("Set Active", key=f"setactive_{name}"):
                 st.session_state["current_project"] = name
+                save_users(users)
+                st.success(f"Active project set to '{name}'.")
                 safe_rerun()
             if a2.button("Edit", key=f"editproj_{name}"):
                 st.session_state["editing_project"] = name
@@ -331,13 +389,12 @@ else:
                     if save_changes:
                         if not new_name:
                             st.error("Name cannot be empty.")
-                        elif new_name != name and new_name in projects:
+                        elif new_name != name and new_name in user_projects:
                             st.error("Another project already has this name.")
                         else:
-                            block = projects.pop(name)
+                            block = user_projects.pop(name)
                             block["description"] = new_desc
-                            projects[new_name] = block
-                            users[current_user]["projects"] = projects
+                            user_projects[new_name] = block
                             if st.session_state["current_project"] == name:
                                 st.session_state["current_project"] = new_name
                             save_users(users)
@@ -359,13 +416,12 @@ else:
                     cancel_delete = cc2.form_submit_button("Cancel")
                 if do_delete:
                     if confirm_text == name:
-                        if len(projects) <= 1:
+                        if len(user_projects) <= 1:
                             st.error("You must keep at least one project.")
                         else:
-                            projects.pop(name, None)
-                            users[current_user]["projects"] = projects
+                            user_projects.pop(name, None)
                             if st.session_state["current_project"] == name:
-                                st.session_state["current_project"] = next(iter(projects.keys()))
+                                st.session_state["current_project"] = next(iter(user_projects.keys()))
                             save_users(users)
                             log_action(current_user, "delete_project", name)
                             st.success(f"Project '{name}' deleted.")
@@ -376,31 +432,126 @@ else:
                 if cancel_delete:
                     st.session_state["confirm_delete_project"] = None
                     safe_rerun()
+
+        st.markdown("---")
+
+        # ------------------------
+        # Admin Dashboard (facelift + search)
+        # ------------------------
+        if role == "Admin":
+            st.header("👑 Admin Dashboard")
+
+            if st.button("🔄 Refresh Users"):
+                safe_rerun()
+
+            admin_users = load_users()  # fresh
+
+            ucol1, ucol2 = st.columns([3, 2])
+            with ucol1:
+                uquery = st.text_input("Search accounts by username or role")
+            with ucol2:
+                urole_filter = st.selectbox("Filter role", ["All", "Admin", "Casting Director", "Assistant"], index=0)
+
+            # Header row
+            uhdr = st.columns([3, 2, 3, 3, 4])
+            uhdr[0].markdown("**Username**")
+            uhdr[1].markdown("**Role**")
+            uhdr[2].markdown("**Last Login**")
+            uhdr[3].markdown("**Projects Accessed**")
+            uhdr[4].markdown("**Actions**")
+
+            # Build items
+            def user_item(u, info):
+                return (
+                    u,
+                    info.get("role", ""),
+                    info.get("last_login", ""),
+                    ", ".join(info.get("projects_accessed", []))
+                )
+
+            items = [user_item(u, i) for u, i in admin_users.items() if isinstance(i, dict)]
+            if uquery:
+                q = uquery.lower().strip()
+                items = [x for x in items if q in x[0].lower() or q in (x[1] or "").lower()]
+            if urole_filter != "All":
+                items = [x for x in items if x[1] == urole_filter]
+
+            for uname, urole, last, projlist in items:
+                cols = st.columns([3, 2, 3, 3, 4])
+                cols[0].markdown(f"**{uname}**")
+                # role editor
+                role_sel = cols[1].selectbox(
+                    "role_sel_" + uname,
+                    ["Admin", "Casting Director", "Assistant"],
+                    index=["Admin", "Casting Director", "Assistant"].index(urole) if urole in ["Admin", "Casting Director", "Assistant"] else 1,
+                    key=f"role_sel_{uname}"
+                )
+                cols[2].markdown(last or "—")
+                cols[3].markdown(projlist or "—")
+
+                a1, a2 = cols[4].columns([1, 1])
+                if a1.button("Save Role", key=f"saverole_{uname}"):
+                    if uname == "admin" and role_sel != "Admin":
+                        st.error("The built-in admin must remain Admin.")
+                    else:
+                        admin_users[uname]["role"] = role_sel
+                        save_users(admin_users)
+                        log_action(current_user, "change_role", f"{uname} -> {role_sel}")
+                        st.success(f"Role updated for {uname}.")
+                        safe_rerun()
+
+                if a2.button("Delete", key=f"deluser_{uname}"):
+                    if uname == "admin":
+                        st.error("Cannot delete the built-in admin.")
+                    else:
+                        admin_users.pop(uname, None)
+                        save_users(admin_users)
+                        log_action(current_user, "delete_user", uname)
+                        st.warning(f"User {uname} deleted.")
+                        safe_rerun()
+
+            st.subheader("Activity Logs")
+            st.json(load_logs())
+
         st.markdown("---")
 
         # ------------------------
         # Participant Management
         # ------------------------
         current = st.session_state["current_project"]
-        proj_block = projects.get(current, _default_project_block())
+        st.header(f"👥 Participants — {current}")
+        proj_block = user_projects.get(current, _default_project_block())
         project_data = proj_block.get("participants", [])
 
-        st.header(f"👥 Participants — {current}")
-
-        # Add New Participant
-        with st.expander("➕ Add New Participant"):
-            with st.form("add_participant"):
-                number = st.text_input("Number")
-                name = st.text_input("Name")
-                role_input = st.text_input("Role")
-                age = st.text_input("Age")
-                agency = st.text_input("Agency")
-                height = st.text_input("Height")
-                waist = st.text_input("Waist")
-                dress_suit = st.text_input("Dress/Suit")
-                availability = st.text_input("Next Availability")
-                photo = st.file_uploader("Upload Photo", type=["jpg", "jpeg", "png"])
-                submitted = st.form_submit_button("Add Participant")
+        # Add / Edit Participant
+        with st.expander("➕ Add New Participant / Edit Existing"):
+            with st.form("add_edit_participant"):
+                idx_edit = st.session_state.get("editing_participant")
+                if idx_edit is not None and 0 <= idx_edit < len(project_data):
+                    p = project_data[idx_edit]
+                    number = st.text_input("Number", value=p.get("number",""))
+                    name = st.text_input("Name", value=p.get("name",""))
+                    role_input = st.text_input("Role", value=p.get("role",""))
+                    age = st.text_input("Age", value=p.get("age",""))
+                    agency = st.text_input("Agency", value=p.get("agency",""))
+                    height = st.text_input("Height", value=p.get("height",""))
+                    waist = st.text_input("Waist", value=p.get("waist",""))
+                    dress_suit = st.text_input("Dress/Suit", value=p.get("dress_suit",""))
+                    availability = st.text_input("Next Availability", value=p.get("availability",""))
+                    photo = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"])
+                    submitted = st.form_submit_button("Update Participant")
+                else:
+                    number = st.text_input("Number")
+                    name = st.text_input("Name")
+                    role_input = st.text_input("Role")
+                    age = st.text_input("Age")
+                    agency = st.text_input("Agency")
+                    height = st.text_input("Height")
+                    waist = st.text_input("Waist")
+                    dress_suit = st.text_input("Dress/Suit")
+                    availability = st.text_input("Next Availability")
+                    photo = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"])
+                    submitted = st.form_submit_button("Add Participant")
 
                 if submitted:
                     entry = {
@@ -413,14 +564,19 @@ else:
                         "waist": waist,
                         "dress_suit": dress_suit,
                         "availability": availability,
-                        "photo": photo_to_b64(photo) if photo else None
+                        "photo": photo_to_b64(photo) if photo else (p.get("photo") if idx_edit is not None else None)
                     }
-                    project_data.append(entry)
-                    projects[current]["participants"] = project_data
-                    users[current_user]["projects"] = projects
+                    if idx_edit is not None:
+                        project_data[idx_edit] = entry
+                        st.session_state["editing_participant"] = None
+                        log_action(current_user, "edit_participant", name)
+                        st.success("Participant updated!")
+                    else:
+                        project_data.append(entry)
+                        log_action(current_user, "add_participant", name)
+                        st.success("Participant added!")
+                    user_projects[current]["participants"] = project_data
                     save_users(users)
-                    st.success("Participant added!")
-                    log_action(current_user, "add_participant", name)
                     safe_rerun()
 
         if not project_data:
@@ -428,8 +584,7 @@ else:
         else:
             for idx, p in enumerate(project_data):
                 with st.container():
-                    cols = st.columns([1, 2, 2])
-                    # Display photo
+                    cols = st.columns([1, 2, 1])
                     if p.get("photo"):
                         try:
                             img = Image.open(io.BytesIO(b64_to_photo(p["photo"])))
@@ -438,8 +593,6 @@ else:
                             cols[0].write("Invalid Photo")
                     else:
                         cols[0].write("No Photo")
-
-                    # Display participant info
                     cols[1].markdown(
                         f"**{p.get('name','Unnamed')}** (#{p.get('number','')})  \n"
                         f"Role: {p.get('role','')} | Age: {p.get('age','')}  \n"
@@ -447,50 +600,13 @@ else:
                         f"Height: {p.get('height','')} | Waist: {p.get('waist','')} | Dress/Suit: {p.get('dress_suit','')}  \n"
                         f"Availability: {p.get('availability','')}"
                     )
-
-                    # Edit / Delete buttons
-                    edit_btn, delete_btn = cols[2].columns(2)
-                    if edit_btn.button("Edit", key=f"edit_{idx}"):
-                        with st.form(f"edit_participant_form_{idx}"):
-                            number_e = st.text_input("Number", value=p.get("number",""))
-                            name_e = st.text_input("Name", value=p.get("name",""))
-                            role_e = st.text_input("Role", value=p.get("role",""))
-                            age_e = st.text_input("Age", value=p.get("age",""))
-                            agency_e = st.text_input("Agency", value=p.get("agency",""))
-                            height_e = st.text_input("Height", value=p.get("height",""))
-                            waist_e = st.text_input("Waist", value=p.get("waist",""))
-                            dress_suit_e = st.text_input("Dress/Suit", value=p.get("dress_suit",""))
-                            availability_e = st.text_input("Next Availability", value=p.get("availability",""))
-                            photo_e = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"])
-                            save_edit = st.form_submit_button("Save")
-                            cancel_edit = st.form_submit_button("Cancel")
-
-                            if save_edit:
-                                p.update({
-                                    "number": number_e,
-                                    "name": name_e,
-                                    "role": role_e,
-                                    "age": age_e,
-                                    "agency": agency_e,
-                                    "height": height_e,
-                                    "waist": waist_e,
-                                    "dress_suit": dress_suit_e,
-                                    "availability": availability_e,
-                                    "photo": photo_to_b64(photo_e) if photo_e else p.get("photo")
-                                })
-                                projects[current]["participants"] = project_data
-                                users[current_user]["projects"] = projects
-                                save_users(users)
-                                st.success("Participant updated!")
-                                log_action(current_user, "edit_participant", name_e)
-                                safe_rerun()
-                            if cancel_edit:
-                                safe_rerun()
-
-                    if delete_btn.button("Delete", key=f"del_{idx}"):
+                    a1, a2 = cols[2].columns(2)
+                    if a1.button("Edit", key=f"editp_{idx}"):
+                        st.session_state["editing_participant"] = idx
+                        safe_rerun()
+                    if a2.button("Delete", key=f"delp_{idx}"):
                         project_data.pop(idx)
-                        projects[current]["participants"] = project_data
-                        users[current_user]["projects"] = projects
+                        user_projects[current]["participants"] = project_data
                         save_users(users)
                         st.warning("Participant deleted")
                         log_action(current_user, "delete_participant", p.get("name",""))

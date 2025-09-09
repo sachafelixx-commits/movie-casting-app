@@ -1,5 +1,10 @@
 import streamlit as st
-import json, os, io, base64
+import json
+import os
+import io
+import base64
+import time
+import sys
 from datetime import datetime
 from docx import Document
 from docx.shared import Inches
@@ -18,30 +23,138 @@ USERS_FILE = "users.json"
 LOG_FILE = "logs.json"
 DEFAULT_PROJECT_NAME = "Default Project"
 
-# ========================
-# Helpers
-# ========================
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+# Lock settings
+LOCK_STALE_SECONDS = 30  # consider lock stale after this many seconds
+LOCK_RETRY_DELAY = 0.08  # seconds between lock attempts
+LOCK_ACQUIRE_TIMEOUT = 5  # seconds to retry before giving up
 
+# ========================
+# File Lock Helpers
+# ========================
+def _lockfile_name(filename):
+    return f"{filename}.lock"
+
+def acquire_file_lock(filename, timeout=LOCK_ACQUIRE_TIMEOUT):
+    """Try to create a .lock file atomically. Wait up to timeout seconds."""
+    lockfile = _lockfile_name(filename)
+    start = time.time()
+    while True:
+        try:
+            # Use O_CREAT | O_EXCL to create atomically; fail if exists
+            fd = os.open(lockfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w") as f:
+                f.write(f"{os.getpid()}\n{time.time()}\n")
+            # created lock file successfully
+            return True
+        except FileExistsError:
+            # check staleness
+            try:
+                mtime = os.path.getmtime(lockfile)
+                age = time.time() - mtime
+                if age > LOCK_STALE_SECONDS:
+                    try:
+                        os.remove(lockfile)
+                    except Exception:
+                        pass  # somebody else removed it
+                else:
+                    # still fresh, wait
+                    if time.time() - start > timeout:
+                        raise TimeoutError(f"Timeout acquiring lock for {filename}")
+                    time.sleep(LOCK_RETRY_DELAY)
+            except FileNotFoundError:
+                # race: file disappeared, retry immediately
+                continue
+        except Exception as e:
+            # unexpected
+            raise
+
+def release_file_lock(filename):
+    lockfile = _lockfile_name(filename)
+    try:
+        if os.path.exists(lockfile):
+            os.remove(lockfile)
+    except Exception:
+        pass
+
+def wait_for_no_lock(filename, timeout=LOCK_ACQUIRE_TIMEOUT):
+    """Wait until there's no lock file or lock becomes stale. Raises on timeout."""
+    lockfile = _lockfile_name(filename)
+    start = time.time()
+    while os.path.exists(lockfile):
+        try:
+            mtime = os.path.getmtime(lockfile)
+            if time.time() - mtime > LOCK_STALE_SECONDS:
+                try:
+                    os.remove(lockfile)
+                    return
+                except Exception:
+                    pass
+        except FileNotFoundError:
+            return
+        if time.time() - start > timeout:
+            raise TimeoutError(f"Timeout waiting for lock to clear: {filename}")
+        time.sleep(LOCK_RETRY_DELAY)
+
+# ========================
+# JSON Helpers (with locks for writes)
+# ========================
 def load_json(filename, default):
-    if os.path.exists(filename):
-        with open(filename, "r") as f:
+    """Read JSON file. If file doesn't exist or parse fails, return default."""
+    try:
+        if not os.path.exists(filename):
+            return default
+        # Wait briefly if someone is writing
+        wait_for_no_lock(filename)
+        with open(filename, "r", encoding="utf-8") as f:
             try:
                 return json.load(f)
             except Exception:
                 return default
-    return default
+    except TimeoutError:
+        # If we couldn't wait for lock, still try reading raw (best-effort)
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default
+    except Exception:
+        return default
 
 def save_json(filename, data):
-    with open(filename, "w") as f:
-        json.dump(data, f, indent=2)
+    """Write JSON file atomically using a lock file to protect concurrent writes."""
+    try:
+        acquire_file_lock(filename)
+    except TimeoutError:
+        # if unable to get lock, raise to notify caller
+        raise
+    try:
+        tmp_name = f"{filename}.tmp"
+        with open(tmp_name, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        # atomic replace
+        os.replace(tmp_name, filename)
+    finally:
+        release_file_lock(filename)
 
 def load_users():
     return load_json(USERS_FILE, {})
 
 def save_users(users):
     save_json(USERS_FILE, users)
+
+def load_logs():
+    return load_json(LOG_FILE, [])
+
+def save_logs(logs):
+    save_json(LOG_FILE, logs)
+
+# ========================
+# Other Helpers
+# ========================
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
 
 def _default_project_block():
     return {
@@ -50,21 +163,23 @@ def _default_project_block():
         "participants": []
     }
 
-def load_logs():
-    return load_json(LOG_FILE, [])
-
-def save_logs(logs):
-    save_json(LOG_FILE, logs)
-
 def log_action(user, action, details=""):
-    logs = load_logs()
-    logs.append({
-        "timestamp": datetime.now().isoformat(),
-        "user": user,
-        "action": action,
-        "details": details
-    })
-    save_logs(logs)
+    # safe append to logs using read-modify-write under lock
+    for attempt in range(2):
+        try:
+            logs = load_logs()
+            logs.append({
+                "timestamp": datetime.now().isoformat(),
+                "user": user,
+                "action": action,
+                "details": details
+            })
+            save_logs(logs)
+            return
+        except TimeoutError:
+            # brief backoff and retry once
+            time.sleep(0.05)
+    # best-effort: if still failing, skip logging to avoid crashing app
 
 def photo_to_b64(file):
     if not file:
@@ -108,7 +223,7 @@ if "editing_project" not in st.session_state:
 if "editing_participant" not in st.session_state:
     st.session_state["editing_participant"] = None
 
-# initial load of users (not authoritative — always reload before writes)
+# initial load (reads are fine without lock)
 users = load_users()
 
 # ========================
@@ -135,7 +250,10 @@ if not st.session_state["logged_in"]:
                 users["admin"]["role"] = "Admin"
                 users["admin"]["last_login"] = datetime.now().isoformat()
                 users["admin"]["projects"] = users["admin"].get("projects", {DEFAULT_PROJECT_NAME: _default_project_block()})
-                save_users(users)
+                try:
+                    save_users(users)
+                except TimeoutError:
+                    st.warning("Couldn't save admin login to disk due to file lock; proceeding anyway.")
                 log_action("admin", "login")
                 st.success("Logged in as Admin ✅")
                 safe_rerun()
@@ -148,7 +266,10 @@ if not st.session_state["logged_in"]:
                 # ensure at least one project exists for this user
                 if "projects" not in users[username] or not isinstance(users[username]["projects"], dict):
                     users[username]["projects"] = {DEFAULT_PROJECT_NAME: _default_project_block()}
-                save_users(users)
+                try:
+                    save_users(users)
+                except TimeoutError:
+                    st.warning("Couldn't persist login time due to file lock; logging in anyway.")
                 log_action(username, "login")
                 st.success(f"Welcome back {username}!")
                 safe_rerun()
@@ -174,19 +295,23 @@ if not st.session_state["logged_in"]:
                     "last_login": datetime.now().isoformat(),
                     "projects": {DEFAULT_PROJECT_NAME: _default_project_block()}
                 }
-                save_users(users)
-                st.success("Account created! Please log in.")
-                safe_rerun()
+                try:
+                    save_users(users)
+                except TimeoutError:
+                    st.error("Unable to create account right now (file locked). Please try again shortly.")
+                else:
+                    st.success("Account created! Please log in.")
+                    safe_rerun()
 
 # ========================
 # Main App (after login)
 # ========================
 else:
-    # ensure we always work off a fresh users dict for reads
+    # always load fresh data for safety
     users = load_users()
     current_user = st.session_state["current_user"]
 
-    # guard: if current_user somehow missing from users, log out
+    # guard: if current_user missing from users, log out
     if current_user not in users:
         st.error("User not found. Please log in again.")
         st.session_state["logged_in"] = False
@@ -200,7 +325,10 @@ else:
         projects = {DEFAULT_PROJECT_NAME: _default_project_block()}
         user_data["projects"] = projects
         users[current_user] = user_data
-        save_users(users)
+        try:
+            save_users(users)
+        except TimeoutError:
+            st.warning("Couldn't persist default project due to file lock; it will be created in memory.")
 
     # Sidebar
     st.sidebar.title("Menu")
@@ -217,14 +345,12 @@ else:
 
     # Modes
     st.sidebar.subheader("Modes")
-    # keep the same toggle call as original (if your streamlit version doesn't support toggle, replace with checkbox)
     try:
         st.session_state["participant_mode"] = st.sidebar.toggle(
             "Enable Participant Mode (Kiosk)",
             value=st.session_state.get("participant_mode", False)
         )
     except Exception:
-        # fallback for streamlit versions without toggle
         st.session_state["participant_mode"] = st.sidebar.checkbox(
             "Enable Participant Mode (Kiosk)",
             value=st.session_state.get("participant_mode", False)
@@ -239,7 +365,7 @@ else:
     active = st.session_state.get("current_project", DEFAULT_PROJECT_NAME)
     st.sidebar.write(f"**{active}**")
 
-    # Participant Mode (Kiosk)
+    # ===== Participant Mode (Kiosk) =====
     if st.session_state["participant_mode"]:
         st.title("👋 Welcome to Casting Check-In")
         st.caption("Please fill in your details below. Your information will be saved to the currently active project.")
@@ -286,12 +412,16 @@ else:
                 projects[active] = proj_block
                 user_data["projects"] = projects
                 users[current_user] = user_data
-                save_users(users)
-                st.success("✅ Thanks for checking in! Next participant may proceed.")
-                log_action(current_user, "participant_checkin", name)
-                safe_rerun()
+                try:
+                    save_users(users)
+                except TimeoutError:
+                    st.error("Unable to save participant right now (file locked). Please try again shortly.")
+                else:
+                    st.success("✅ Thanks for checking in! Next participant may proceed.")
+                    log_action(current_user, "participant_checkin", name)
+                    safe_rerun()
 
-    # Casting Manager Mode
+    # ===== Casting Manager Mode =====
     else:
         st.title("🎬 Sacha's Casting Manager")
 
@@ -335,11 +465,15 @@ else:
                         }
                         user_data["projects"] = projects
                         users[current_user] = user_data
-                        save_users(users)
-                        log_action(current_user, "create_project", p_name)
-                        st.success(f"Project '{p_name}' created.")
-                        st.session_state["current_project"] = p_name
-                        safe_rerun()
+                        try:
+                            save_users(users)
+                        except TimeoutError:
+                            st.error("Unable to create project right now (file locked). Please try again shortly.")
+                        else:
+                            log_action(current_user, "create_project", p_name)
+                            st.success(f"Project '{p_name}' created.")
+                            st.session_state["current_project"] = p_name
+                            safe_rerun()
 
         # Prepare filtered/sorted list
         def proj_meta_tuple(name, block):
@@ -347,7 +481,7 @@ else:
             created = block.get("created_at", datetime.now().isoformat())
             return name, block.get("description", ""), created, count
 
-        # Always work off the up-to-date projects dict for rendering
+        # Always work off up-to-date projects
         users = load_users()
         user_data = users.get(current_user, user_data)
         projects = user_data.get("projects", {})
@@ -424,11 +558,15 @@ else:
                                 st.session_state["current_project"] = new_name
                             user_data["projects"] = projects
                             users[current_user] = user_data
-                            save_users(users)
-                            log_action(current_user, "edit_project", f"{name} -> {new_name}")
-                            st.success("Project updated.")
-                            st.session_state["editing_project"] = None
-                            safe_rerun()
+                            try:
+                                save_users(users)
+                            except TimeoutError:
+                                st.error("Unable to save project changes (file locked). Please try again shortly.")
+                            else:
+                                log_action(current_user, "edit_project", f"{name} -> {new_name}")
+                                st.success("Project updated.")
+                                st.session_state["editing_project"] = None
+                                safe_rerun()
                     if cancel_edit:
                         st.session_state["editing_project"] = None
                         safe_rerun()
@@ -457,11 +595,15 @@ else:
                                 st.session_state["current_project"] = next(iter(projects.keys()))
                             user_data["projects"] = projects
                             users[current_user] = user_data
-                            save_users(users)
-                            log_action(current_user, "delete_project", name)
-                            st.success(f"Project '{name}' deleted.")
-                            st.session_state["confirm_delete_project"] = None
-                            safe_rerun()
+                            try:
+                                save_users(users)
+                            except TimeoutError:
+                                st.error("Unable to delete project (file locked). Please try again shortly.")
+                            else:
+                                log_action(current_user, "delete_project", name)
+                                st.success(f"Project '{name}' deleted.")
+                                st.session_state["confirm_delete_project"] = None
+                                safe_rerun()
                     else:
                         st.error("Project name mismatch. Not deleted.")
                 if cancel_delete:
@@ -515,10 +657,14 @@ else:
                     projects[current]["participants"] = project_data
                     user_data["projects"] = projects
                     users[current_user] = user_data
-                    save_users(users)
-                    st.success("Participant added!")
-                    log_action(current_user, "add_participant", name)
-                    safe_rerun()
+                    try:
+                        save_users(users)
+                    except TimeoutError:
+                        st.error("Unable to save participant right now (file locked). Please try again shortly.")
+                    else:
+                        st.success("Participant added!")
+                        log_action(current_user, "add_participant", name)
+                        safe_rerun()
 
         if not project_data:
             st.info("No participants yet.")
@@ -576,10 +722,14 @@ else:
                                 projects[current]["participants"] = project_data
                                 user_data["projects"] = projects
                                 users[current_user] = user_data
-                                save_users(users)
-                                st.success("Participant updated!")
-                                log_action(current_user, "edit_participant", ename)
-                                safe_rerun()
+                                try:
+                                    save_users(users)
+                                except TimeoutError:
+                                    st.error("Unable to save participant edits (file locked). Please try again shortly.")
+                                else:
+                                    st.success("Participant updated!")
+                                    log_action(current_user, "edit_participant", ename)
+                                    safe_rerun()
                             if cancel_edit:
                                 safe_rerun()
 
@@ -589,10 +739,14 @@ else:
                         projects[current]["participants"] = project_data
                         user_data["projects"] = projects
                         users[current_user] = user_data
-                        save_users(users)
-                        st.warning("Participant deleted")
-                        log_action(current_user, "delete_participant", p.get("name",""))
-                        safe_rerun()
+                        try:
+                            save_users(users)
+                        except TimeoutError:
+                            st.error("Unable to delete participant (file locked). Please try again shortly.")
+                        else:
+                            st.warning("Participant deleted")
+                            log_action(current_user, "delete_participant", p.get("name",""))
+                            safe_rerun()
 
         # ------------------------
         # Export Participants to Word
@@ -705,10 +859,14 @@ else:
                         st.error("Built-in admin must remain Admin.")
                     else:
                         admin_users[uname]["role"] = role_sel
-                        save_users(admin_users)
-                        log_action(current_user, "change_role", f"{uname} -> {role_sel}")
-                        st.success(f"Role updated for {uname}.")
-                        safe_rerun()
+                        try:
+                            save_users(admin_users)
+                        except TimeoutError:
+                            st.error("Unable to change role (file locked). Please try again shortly.")
+                        else:
+                            log_action(current_user, "change_role", f"{uname} -> {role_sel}")
+                            st.success(f"Role updated for {uname}.")
+                            safe_rerun()
 
                 if a2.button("Delete", key=f"deluser_{uname}"):
                     admin_users = load_users()
@@ -719,7 +877,11 @@ else:
                         st.error("Cannot delete the built-in admin.")
                     else:
                         admin_users.pop(uname, None)
-                        save_users(admin_users)
-                        log_action(current_user, "delete_user", uname)
-                        st.warning(f"User {uname} deleted.")
-                        safe_rerun()
+                        try:
+                            save_users(admin_users)
+                        except TimeoutError:
+                            st.error("Unable to delete user (file locked). Please try again shortly.")
+                        else:
+                            log_action(current_user, "delete_user", uname)
+                            st.warning(f"User {uname} deleted.")
+                            safe_rerun()

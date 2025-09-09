@@ -124,6 +124,7 @@ if not st.session_state["logged_in"]:
                 st.error("Invalid credentials")
 
     else:  # Sign Up
+        users = load_users()  # always reload fresh
         new_user = st.text_input("New Username")
         new_pass = st.text_input("New Password", type="password")
         role = st.selectbox("Role", ["Casting Director", "Assistant"])
@@ -141,6 +142,7 @@ if not st.session_state["logged_in"]:
                 }
                 save_users(users)
                 st.success("Account created! Please log in.")
+                safe_rerun()
 else:
     # ------------------------
     # Main App

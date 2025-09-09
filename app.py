@@ -418,3 +418,70 @@ if st.button("Download Word File of Current Project"):
         )
     else:
         st.info("No participants in this project yet.")
+# ------------------------
+# Admin Dashboard (User Account Management)
+# ------------------------
+if role == "Admin":
+    st.header("👑 Admin Dashboard")
+
+    if st.button("🔄 Refresh Users"):
+        safe_rerun()
+
+    admin_users = load_users()  # fresh load each time
+
+    ucol1, ucol2 = st.columns([3, 2])
+    with ucol1:
+        uquery = st.text_input("Search accounts by username or role")
+    with ucol2:
+        urole_filter = st.selectbox("Filter role", ["All", "Admin", "Casting Director", "Assistant"], index=0)
+
+    # Header row
+    uhdr = st.columns([3, 2, 3, 3, 4])
+    uhdr[0].markdown("**Username**")
+    uhdr[1].markdown("**Role**")
+    uhdr[2].markdown("**Last Login**")
+    uhdr[3].markdown("**Projects**")
+    uhdr[4].markdown("**Actions**")
+
+    items = []
+    for u, info in admin_users.items():
+        if not isinstance(info, dict):
+            continue
+        if uquery and uquery.lower() not in u.lower() and uquery.lower() not in info.get("role","").lower():
+            continue
+        if urole_filter != "All" and info.get("role","") != urole_filter:
+            continue
+        items.append((u, info.get("role",""), info.get("last_login",""), ", ".join(info.get("projects",[]))))
+
+    for uname, urole, last, projlist in items:
+        cols = st.columns([3, 2, 3, 3, 4])
+        cols[0].markdown(f"**{uname}**")
+        role_sel = cols[1].selectbox(
+            "role_sel_" + uname,
+            ["Admin", "Casting Director", "Assistant"],
+            index=["Admin","Casting Director","Assistant"].index(urole) if urole in ["Admin","Casting Director","Assistant"] else 1,
+            key=f"role_sel_{uname}"
+        )
+        cols[2].markdown(last or "—")
+        cols[3].markdown(projlist or "—")
+
+        a1, a2 = cols[4].columns([1,1])
+        if a1.button("Save Role", key=f"saverole_{uname}"):
+            if uname == "admin" and role_sel != "Admin":
+                st.error("Built-in admin must remain Admin.")
+            else:
+                admin_users[uname]["role"] = role_sel
+                save_users(admin_users)
+                log_action(current_user, "change_role", f"{uname} -> {role_sel}")
+                st.success(f"Role updated for {uname}.")
+                safe_rerun()
+
+        if a2.button("Delete", key=f"deluser_{uname}"):
+            if uname == "admin":
+                st.error("Cannot delete the built-in admin.")
+            else:
+                admin_users.pop(uname, None)
+                save_users(admin_users)
+                log_action(current_user, "delete_user", uname)
+                st.warning(f"User {uname} deleted.")
+                safe_rerun()

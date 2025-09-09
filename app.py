@@ -119,7 +119,8 @@ def save_photo_file(uploaded_file, username: str, project_name: str) -> str:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        return path.replace("\", "/")
+return path.replace("\\", "/")
+
     except Exception:
         return None
 

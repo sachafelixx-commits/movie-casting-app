@@ -1,3 +1,4 @@
+# sachas_casting_manager.py
 import streamlit as st
 import json
 import os
@@ -11,7 +12,7 @@ import re
 from datetime import datetime
 from docx import Document
 from docx.shared import Inches
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 import hashlib
 
 # ========================
@@ -26,6 +27,7 @@ USERS_FILE = "users.json"
 LOG_FILE = "logs.json"
 DEFAULT_PROJECT_NAME = "Default Project"
 MEDIA_DIR = "media"
+MIGRATION_MARKER = os.path.join(MEDIA_DIR, ".migrated_v1")
 
 # Lock settings
 LOCK_STALE_SECONDS = 30  # consider lock stale after this many seconds
@@ -167,7 +169,7 @@ def log_action(user, action, details=""):
             return
         except TimeoutError:
             time.sleep(0.05)
-    # best-effort only
+    # best-effort
 
 def safe_rerun():
     try:
@@ -183,23 +185,19 @@ def _sanitize_for_path(s: str) -> str:
     if not isinstance(s, str):
         s = str(s)
     s = s.strip()
-    # replace any characters not alphanumeric, dash, underscore with underscore
     return re.sub(r"[^0-9A-Za-z\-_]+", "_", s)
 
 # save uploaded file bytes to media/<user>/<project>/<uuid>.<ext>
 def save_photo_file(uploaded_file, username: str, project_name: str) -> str:
     if not uploaded_file:
         return None
-    # ensure media dir exists
     user_safe = _sanitize_for_path(username)
     project_safe = _sanitize_for_path(project_name)
     user_dir = os.path.join(MEDIA_DIR, user_safe, project_safe)
     os.makedirs(user_dir, exist_ok=True)
-    # determine extension from uploaded_file.name
     orig_name = getattr(uploaded_file, "name", None) or ""
     _, ext = os.path.splitext(orig_name)
     ext = ext.lower() if ext else ""
-    # fallback extensions based on mimetype if ext missing
     if not ext:
         typ = getattr(uploaded_file, "type", "") or ""
         if "jpeg" in typ or "jpg" in typ:
@@ -208,7 +206,6 @@ def save_photo_file(uploaded_file, username: str, project_name: str) -> str:
             ext = ".png"
         else:
             ext = ".jpg"
-    # filename is uuid4 + ext
     filename = f"{uuid.uuid4().hex}{ext}"
     path = os.path.join(user_dir, filename)
     try:
@@ -217,7 +214,6 @@ def save_photo_file(uploaded_file, username: str, project_name: str) -> str:
         except Exception:
             pass
         data = uploaded_file.read()
-        # write bytes
         with open(path, "wb") as f:
             if isinstance(data, str):
                 data = data.encode("utf-8")
@@ -228,14 +224,57 @@ def save_photo_file(uploaded_file, username: str, project_name: str) -> str:
     except Exception:
         return None
 
+# save raw bytes to media path (used for migrating base64)
+def save_photo_bytes(bytes_data: bytes, username: str, project_name: str, ext_hint: str = None) -> str:
+    if not bytes_data:
+        return None
+    user_safe = _sanitize_for_path(username)
+    project_safe = _sanitize_for_path(project_name)
+    user_dir = os.path.join(MEDIA_DIR, user_safe, project_safe)
+    os.makedirs(user_dir, exist_ok=True)
+    # detect image format using Pillow
+    ext = ".jpg"
+    try:
+        buf = io.BytesIO(bytes_data)
+        buf.seek(0)
+        img = Image.open(buf)
+        fmt = (img.format or "").lower()
+        if fmt in ["jpeg", "jpg"]:
+            ext = ".jpg"
+        elif fmt == "png":
+            ext = ".png"
+        elif fmt == "gif":
+            ext = ".gif"
+        elif fmt == "webp":
+            ext = ".webp"
+        else:
+            if ext_hint:
+                ext = ext_hint
+            else:
+                ext = ".jpg"
+    except UnidentifiedImageError:
+        # fallback to hint or jpg
+        ext = ext_hint or ".jpg"
+    except Exception:
+        ext = ext_hint or ".jpg"
+
+    filename = f"{uuid.uuid4().hex}{ext if ext.startswith('.') else '.'+ext}"
+    path = os.path.join(user_dir, filename)
+    try:
+        with open(path, "wb") as f:
+            f.write(bytes_data)
+            f.flush()
+            os.fsync(f.fileno())
+        return path.replace("\\", "/")
+    except Exception:
+        return None
+
 def remove_media_file(path: str):
     try:
         if not path:
             return
-        # only remove files under MEDIA_DIR to be safe
         if isinstance(path, str) and os.path.exists(path) and os.path.commonpath([os.path.abspath(path), os.path.abspath(MEDIA_DIR)]) == os.path.abspath(MEDIA_DIR):
             os.remove(path)
-            # try removing empty parent dirs up to MEDIA_DIR
             parent = os.path.dirname(path)
             while parent and os.path.abspath(parent) != os.path.abspath(MEDIA_DIR):
                 try:
@@ -250,22 +289,14 @@ def remove_media_file(path: str):
         pass
 
 def get_photo_bytes(photo_field):
-    """
-    Accepts either:
-    - a media file path (string) -> return file bytes
-    - a base64 string -> return decoded bytes
-    - None -> return None
-    """
     if not photo_field:
         return None
-    # if path exists on disk, read it
     if isinstance(photo_field, str) and os.path.exists(photo_field):
         try:
             with open(photo_field, "rb") as f:
                 return f.read()
         except Exception:
             return None
-    # if string looks like base64, attempt decode
     if isinstance(photo_field, str):
         try:
             return base64.b64decode(photo_field)
@@ -273,7 +304,6 @@ def get_photo_bytes(photo_field):
             return None
     return None
 
-# maintain backward compatibility: not used for new uploads
 def photo_to_b64(file):
     if not file:
         return None
@@ -296,6 +326,100 @@ def b64_to_photo(b64_string):
         return base64.b64decode(b64_string)
     except Exception:
         return None
+
+# ========================
+# Migration: move existing base64 images to media/ and update users.json
+# ========================
+def looks_like_base64_image(s: str) -> bool:
+    if not isinstance(s, str):
+        return False
+    # small heuristic: long string (>120 chars), contains only base64 chars and maybe padding, and not a filesystem path
+    if len(s) < 120:
+        return False
+    if os.path.exists(s):
+        return False
+    # base64 regex (allow newlines)
+    if re.fullmatch(r"[A-Za-z0-9+/=\r\n]+", s):
+        return True
+    return False
+
+def migrate_base64_photos_once():
+    # if migration marker exists, skip
+    try:
+        if os.path.exists(MIGRATION_MARKER):
+            return
+    except Exception:
+        pass
+
+    users = load_users()
+    changed = False
+
+    for uname, info in list(users.items()):
+        if not isinstance(info, dict):
+            continue
+        projects = info.get("projects", {})
+        if not isinstance(projects, dict):
+            continue
+        for pname, pblock in list(projects.items()):
+            participants = pblock.get("participants", [])
+            if not isinstance(participants, list):
+                continue
+            for idx, entrant in enumerate(participants):
+                photo_field = entrant.get("photo")
+                # if already a filesystem path, skip
+                if isinstance(photo_field, str) and os.path.exists(photo_field):
+                    continue
+                # if looks like base64, attempt decode & save
+                if looks_like_base64_image(photo_field):
+                    try:
+                        bytes_data = base64.b64decode(photo_field)
+                        # detect extension via Pillow
+                        ext_hint = ".jpg"
+                        try:
+                            buf = io.BytesIO(bytes_data)
+                            buf.seek(0)
+                            img = Image.open(buf)
+                            fmt = (img.format or "").lower()
+                            if fmt in ["jpeg", "jpg"]:
+                                ext_hint = ".jpg"
+                            elif fmt == "png":
+                                ext_hint = ".png"
+                            elif fmt == "gif":
+                                ext_hint = ".gif"
+                            elif fmt == "webp":
+                                ext_hint = ".webp"
+                        except Exception:
+                            pass
+                        new_path = save_photo_bytes(bytes_data, uname, pname, ext_hint)
+                        if new_path:
+                            users[uname]["projects"][pname]["participants"][idx]["photo"] = new_path
+                            changed = True
+                    except Exception:
+                        # if decode fails, skip
+                        continue
+
+    if changed:
+        # save users under lock
+        try:
+            save_users(users)
+        except TimeoutError:
+            # if unable to save, don't crash; try later
+            pass
+
+    # create marker file to avoid re-running
+    try:
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+        with open(MIGRATION_MARKER, "w", encoding="utf-8") as f:
+            f.write(f"migrated_at={datetime.now().isoformat()}\n")
+    except Exception:
+        pass
+
+# Run migration at startup (best-effort)
+try:
+    migrate_base64_photos_once()
+except Exception:
+    # don't let migration crash the app
+    pass
 
 # ========================
 # Session State Init
@@ -483,7 +607,6 @@ else:
                 proj_block = projects.get(active, _default_project_block())
                 participants = proj_block.get("participants", [])
 
-                # save photo to disk and store path
                 photo_path = save_photo_file(photo, current_user, active) if photo else None
 
                 entry = {
@@ -517,7 +640,7 @@ else:
         st.title("🎬 Sacha's Casting Manager")
 
         # ------------------------
-        # Project Manager (facelift + search)
+        # Project Manager
         # ------------------------
         st.header("📁 Project Manager")
         pm_col1, pm_col2 = st.columns([3, 2])
@@ -566,7 +689,7 @@ else:
                             st.session_state["current_project"] = p_name
                             safe_rerun()
 
-        # Prepare filtered/sorted list
+        # Project list rendering
         def proj_meta_tuple(name, block):
             count = len(block.get("participants", []))
             created = block.get("created_at", datetime.now().isoformat())
@@ -656,7 +779,6 @@ else:
                                             shutil.move(oldpath, newpath)
                                         except Exception:
                                             pass
-                                    # remove old dir if empty
                                     try:
                                         if not os.listdir(old_dir):
                                             os.rmdir(old_dir)
@@ -793,7 +915,6 @@ else:
             for idx, p in enumerate(project_data):
                 with st.container():
                     cols = st.columns([1, 2, 1, 2])
-                    # load photo bytes from either media file or base64
                     bytes_data = get_photo_bytes(p.get("photo"))
                     if bytes_data:
                         try:
@@ -836,11 +957,9 @@ else:
                             save_edit = st.form_submit_button("Save Changes")
                             cancel_edit = st.form_submit_button("Cancel")
                             if save_edit:
-                                # if new photo uploaded, save it and remove old media file (if any)
                                 new_photo_path = p.get("photo")
                                 if ephoto:
                                     new_photo_path = save_photo_file(ephoto, current_user, current)
-                                    # remove old media file if it exists and is under MEDIA_DIR
                                     old_photo = p.get("photo")
                                     if isinstance(old_photo, str) and os.path.exists(old_photo):
                                         remove_media_file(old_photo)
@@ -873,7 +992,6 @@ else:
 
                     # Delete participant
                     if d_btn.button("Delete", key=f"del_{idx}"):
-                        # remove media file if it exists
                         pf = p.get("photo")
                         if isinstance(pf, str) and os.path.exists(pf):
                             remove_media_file(pf)

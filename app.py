@@ -248,6 +248,21 @@ def init_db():
         c.execute("CREATE INDEX idx_participants_project ON participants(project_id);")
         conn.commit()
 
+# ------------------------
+# log_action - needed early
+# ------------------------
+def log_action(user, action, details=""):
+    """Insert a log row into logs table. Best-effort: quietly ignore on failure."""
+    try:
+        with db_transaction() as conn:
+            conn.execute(
+                "INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, ?, ?)",
+                (datetime.now().isoformat(), user, action, details)
+            )
+    except Exception:
+        # swallow errors - logging should not break the app
+        pass
+
 # ========================
 # Migration from users.json
 # ========================

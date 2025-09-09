@@ -1,4 +1,4 @@
-# sachas_casting_manager_sqlite_fixed_rerun.py
+# sachas_casting_manager_sqlite_fixed_signup.py
 import streamlit as st
 import sqlite3
 import json
@@ -482,13 +482,19 @@ if "confirm_delete_project" not in st.session_state:
     st.session_state["confirm_delete_project"] = None
 if "_needs_refresh" not in st.session_state:
     st.session_state["_needs_refresh"] = False
+if "prefill_username" not in st.session_state:
+    st.session_state["prefill_username"] = ""
 
 if not st.session_state["logged_in"]:
     st.title("🎬 Sacha's Casting Manager")
     choice = st.radio("Choose an option", ["Login", "Sign Up"], horizontal=True)
 
     if choice == "Login":
-        username = st.text_input("Username")
+        # prefill username if just signed up
+        username = st.text_input("Username", value=st.session_state.get("prefill_username", ""))
+        # clear prefill after showing it once (so it doesn't persist forever)
+        if st.session_state.get("prefill_username"):
+            st.session_state["prefill_username"] = ""
         password = st.text_input("Password", type="password")
         login_btn = st.button("Login")
         if login_btn:
@@ -505,6 +511,7 @@ if not st.session_state["logged_in"]:
                 st.session_state["current_user"] = "admin"
                 st.success("Logged in as Admin ✅")
                 safe_rerun()
+            # normal login
             try:
                 conn = db_connect()
                 user = get_user_by_username(conn, username)
@@ -522,13 +529,16 @@ if not st.session_state["logged_in"]:
             else:
                 st.error("Invalid credentials")
     else:
-        new_user = st.text_input("New Username")
-        new_pass = st.text_input("New Password", type="password")
-        role = st.selectbox("Role", ["Casting Director", "Assistant"])
-        signup_btn = st.button("Sign Up")
+        # Signup using a form to make submission reliable
+        with st.form("signup_form"):
+            new_user = st.text_input("New Username")
+            new_pass = st.text_input("New Password", type="password")
+            role = st.selectbox("Role", ["Casting Director", "Assistant"])
+            signup_btn = st.form_submit_button("Sign Up")
+
         if signup_btn:
             if not new_user or not new_pass:
-                st.error("Please provide username and password")
+                st.error("Please provide a username and password")
             else:
                 try:
                     with db_transaction() as conn:
@@ -538,8 +548,11 @@ if not st.session_state["logged_in"]:
                         else:
                             create_user(conn, new_user, hash_password(new_pass), role=role)
                             log_action(new_user, "signup", role)
-                            st.success("Account created. Please login.")
-                            safe_rerun()
+                            # prefill login with the created username for convenience
+                            st.session_state["prefill_username"] = new_user
+                            # show confirmation but DO NOT rerun immediately so user sees the message
+                            st.success("Account created! Please log in.")
+                            # do not call safe_rerun() here — that was hiding the success message
                 except Exception as e:
                     st.error(f"Unable to create account: {e}")
 

@@ -36,41 +36,50 @@ st.markdown(
     """
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-    /* Limit content width for large screens and add comfortable padding */
-    .block-container{max-width:1200px; padding-left:1rem; padding-right:1rem;}
-
-    /* Make images responsive */
-    img{max-width:100% !important; height:auto !important;}
-
     /* Bigger, touch-friendly buttons */
-    .stButton>button, button{padding: .6rem 1rem !important; font-size: 1rem !important;}
-
-    /* Participant card simple styling (applies when using raw HTML blocks) */
-    .part-row{display:flex;flex-wrap:wrap;align-items:flex-start;gap:12px;margin-bottom:12px;padding:10px;border-radius:8px;border:1px solid rgba(0,0,0,0.06);background:#fff}
-    .part-photo{flex:0 0 100px}
-    .part-info{flex:1 1 200px;min-width:160px}
-
-    /* Collapsible behavior for small screens */
-    @media (max-width:700px){
-      .part-row{flex-direction:row}
-      .part-photo{flex-basis:80px}
-      .block-container{padding-left:0.6rem;padding-right:0.6rem}
-      h1{font-size:1.4rem}
-      h2{font-size:1.1rem}
+    .stButton>button, button {
+      padding: .6rem 1rem !important;
+      font-size: 1rem !important;
     }
 
-    /* Make sidebar areas a bit roomier on mobile */
-    @media (max-width:900px){
-      .css-1lsmgbg.e1fqkh3o2{padding:0.4rem 0.6rem;} /* best-effort target */
+    /* Participant card simple styling */
+    .part-row {
+      display:flex;
+      flex-wrap:wrap;
+      align-items:flex-start;
+      gap:12px;
+      margin-bottom:12px;
+      padding:10px;
+      border-radius:8px;
+      border:1px solid rgba(0,0,0,0.06);
+      background:#fff;
+    }
+    .part-photo { flex:0 0 100px; }
+    .part-info { flex:1 1 200px; min-width:160px; }
+
+    /* Collapsible behavior for small screens */
+    @media (max-width:700px) {
+      .part-row { flex-direction:row; }
+      .part-photo { flex-basis:80px; }
+      .block-container { padding-left:0.6rem; padding-right:0.6rem; }
+      h1 { font-size:1.4rem; }
+      h2 { font-size:1.1rem; }
+    }
+
+    /* Make sidebar areas a bit roomier on mobile (best-effort selector) */
+    @media (max-width:900px) {
+      .css-1lsmgbg.e1fqkh3o2 { padding:0.4rem 0.6rem; }
     }
 
     /* Improve table-like project header alignment */
-    .project-row {display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid rgba(0,0,0,0.02)}
-    .project-name{flex:3}
-    .project-desc{flex:4}
-    .project-created{flex:2}
-    .project-count{flex:1}
-    .project-actions{flex:3;display:flex;gap:8px}
+    .project-row { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:8px 0; border-bottom:1px solid rgba(0,0,0,0.02); }
+    .project-name { flex:3; }
+    .project-desc { flex:4; }
+    .project-created { flex:2; }
+    .project-count { flex:1; }
+    .project-actions { flex:3; display:flex; gap:8px; }
+    /* ensure images scale */
+    img { max-width:100% !important; height:auto !important; }
     </style>
     """,
     unsafe_allow_html=True,

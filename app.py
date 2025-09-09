@@ -1,4 +1,4 @@
-# sachas_casting_manager_sqlite.py
+# sachas_casting_manager_sqlite_fixed_rerun.py
 import streamlit as st
 import sqlite3
 import json
@@ -56,6 +56,25 @@ def looks_like_base64_image(s: str) -> bool:
     if re.fullmatch(r"[A-Za-z0-9+/=\r\n]+", s):
         return True
     return False
+
+# -------------------------
+# safe_rerun helper
+# -------------------------
+def safe_rerun():
+    """Try to re-run the Streamlit script without raising an exception if not allowed."""
+    try:
+        st.experimental_rerun()
+        return
+    except Exception:
+        pass
+    try:
+        st.rerun()
+        return
+    except Exception:
+        pass
+    # As a last resort, toggle a session flag so Streamlit sees state change and re-executes
+    st.session_state["_needs_refresh"] = not st.session_state.get("_needs_refresh", False)
+    return
 
 # save uploaded file bytes to media/<username>/<project>/<uuid>.<ext>
 def save_photo_file(uploaded_file, username: str, project_name: str) -> str:
@@ -176,8 +195,11 @@ def db_connect():
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     # enable WAL for better concurrency
-    cur.execute("PRAGMA journal_mode = WAL;")
-    cur.execute(f"PRAGMA synchronous = {PRAGMA_SYNCHRONOUS};")
+    try:
+        cur.execute("PRAGMA journal_mode = WAL;")
+        cur.execute(f"PRAGMA synchronous = {PRAGMA_SYNCHRONOUS};")
+    except Exception:
+        pass
     return conn
 
 @contextmanager
@@ -194,7 +216,6 @@ def db_transaction():
 
 def init_db():
     if os.path.exists(DB_FILE):
-        # still ensure pragmas set on new connections
         return
     with db_transaction() as conn:
         c = conn.cursor()
@@ -243,7 +264,6 @@ def init_db():
                 details TEXT
             );
         """)
-        # indexes
         c.execute("CREATE INDEX idx_projects_user ON projects(user_id);")
         c.execute("CREATE INDEX idx_participants_project ON participants(project_id);")
         conn.commit()
@@ -260,18 +280,15 @@ def log_action(user, action, details=""):
                 (datetime.now().isoformat(), user, action, details)
             )
     except Exception:
-        # swallow errors - logging should not break the app
         pass
 
 # ========================
 # Migration from users.json
 # ========================
 def migrate_from_json_if_needed():
-    # If migration marker exists or DB exists, skip migration if already migrated
     if os.path.exists(MIGRATION_MARKER):
         return
     if not os.path.exists(USERS_JSON):
-        # nothing to migrate, create marker
         try:
             ensure_media_dir()
             with open(MIGRATION_MARKER, "w", encoding="utf-8") as f:
@@ -280,7 +297,6 @@ def migrate_from_json_if_needed():
             pass
         return
 
-    # load json and import
     try:
         with open(USERS_JSON, "r", encoding="utf-8") as f:
             users = json.load(f)
@@ -296,11 +312,8 @@ def migrate_from_json_if_needed():
             pass
         return
 
-    # start DB (init if needed)
     init_db()
 
-    # Map username -> user_id
-    user_map = {}
     with db_transaction() as conn:
         c = conn.cursor()
         for uname, info in users.items():
@@ -309,7 +322,6 @@ def migrate_from_json_if_needed():
             pw = info.get("password") or ""
             role = info.get("role") or "Casting Director"
             last_login = info.get("last_login")
-            # ensure password is hashed: assume already hashed in JSON; if not hashed (length not 64), hash it
             if pw and len(pw) != 64:
                 pw = hash_password(pw)
             if uname == "admin" and pw == "":
@@ -320,16 +332,12 @@ def migrate_from_json_if_needed():
                           (uname, pw or hash_password(""), role, last_login))
                 user_id = c.lastrowid
             except sqlite3.IntegrityError:
-                # user exists already (unlikely), fetch id
                 c.execute("SELECT id FROM users WHERE username=?", (uname,))
                 row = c.fetchone()
                 user_id = row["id"] if row else None
             if user_id:
-                user_map[uname] = user_id
-                # migrate projects
                 projects = info.get("projects", {}) or {}
                 if not isinstance(projects, dict) or not projects:
-                    # create default project
                     projects = {DEFAULT_PROJECT_NAME: {"description":"", "created_at": datetime.now().isoformat(), "participants":[]}}
                 for pname, pblock in projects.items():
                     if not isinstance(pblock, dict):
@@ -341,7 +349,6 @@ def migrate_from_json_if_needed():
                                   (user_id, pname, desc, created_at))
                         project_id = c.lastrowid
                     except sqlite3.IntegrityError:
-                        # fallback: find existing
                         c.execute("SELECT id FROM projects WHERE user_id=? AND name=?", (user_id, pname))
                         prow = c.fetchone()
                         project_id = prow["id"] if prow else None
@@ -350,7 +357,6 @@ def migrate_from_json_if_needed():
                         for entrant in participants:
                             if not isinstance(entrant, dict):
                                 continue
-                            # handle photo field: if looks like path and exists, use; if base64, decode and save as file
                             photo_field = entrant.get("photo")
                             final_path = None
                             if isinstance(photo_field, str) and os.path.exists(photo_field):
@@ -380,8 +386,6 @@ def migrate_from_json_if_needed():
                                 entrant.get("availability"),
                                 final_path
                             ))
-        # end of users loop
-    # create migration marker file
     try:
         ensure_media_dir()
         with open(MIGRATION_MARKER, "w", encoding="utf-8") as f:
@@ -433,7 +437,6 @@ def get_project_by_name(conn, user_id, name):
     return c.fetchone()
 
 def rename_project_move_media(old_name, new_name, username):
-    # move media under media/<username>/<old_name> to .../<new_name>
     old_dir = os.path.join(MEDIA_DIR, _sanitize_for_path(username), _sanitize_for_path(old_name))
     new_dir = os.path.join(MEDIA_DIR, _sanitize_for_path(username), _sanitize_for_path(new_name))
     try:
@@ -446,7 +449,6 @@ def rename_project_move_media(old_name, new_name, username):
                     shutil.move(oldp, newp)
                 except Exception:
                     pass
-            # remove old dir if empty
             try:
                 if not os.listdir(old_dir):
                     os.rmdir(old_dir)
@@ -478,6 +480,8 @@ if "editing_project" not in st.session_state:
     st.session_state["editing_project"] = None
 if "confirm_delete_project" not in st.session_state:
     st.session_state["confirm_delete_project"] = None
+if "_needs_refresh" not in st.session_state:
+    st.session_state["_needs_refresh"] = False
 
 if not st.session_state["logged_in"]:
     st.title("🎬 Sacha's Casting Manager")
@@ -490,20 +494,17 @@ if not st.session_state["logged_in"]:
         if login_btn:
             # admin backdoor
             if username == "admin" and password == "supersecret":
-                # ensure admin exists
                 with db_transaction() as conn:
                     user = get_user_by_username(conn, "admin")
                     if not user:
                         create_user(conn, "admin", hash_password("supersecret"), role="Admin")
                     else:
-                        # ensure admin role
                         conn.execute("UPDATE users SET role=?, password=? WHERE username=?", ("Admin", hash_password("supersecret"), "admin"))
                     log_action("admin", "login", "backdoor")
                 st.session_state["logged_in"] = True
                 st.session_state["current_user"] = "admin"
                 st.success("Logged in as Admin ✅")
-                st.experimental_rerun()
-            # normal login
+                safe_rerun()
             try:
                 conn = db_connect()
                 user = get_user_by_username(conn, username)
@@ -517,7 +518,7 @@ if not st.session_state["logged_in"]:
                 st.session_state["logged_in"] = True
                 st.session_state["current_user"] = username
                 st.success(f"Welcome back {username}!")
-                st.experimental_rerun()
+                safe_rerun()
             else:
                 st.error("Invalid credentials")
     else:
@@ -538,7 +539,7 @@ if not st.session_state["logged_in"]:
                             create_user(conn, new_user, hash_password(new_pass), role=role)
                             log_action(new_user, "signup", role)
                             st.success("Account created. Please login.")
-                            st.experimental_rerun()
+                            safe_rerun()
                 except Exception as e:
                     st.error(f"Unable to create account: {e}")
 
@@ -547,7 +548,6 @@ if not st.session_state["logged_in"]:
 # ========================
 else:
     current_username = st.session_state["current_user"]
-    # load user id and info
     try:
         conn_temp = db_connect()
         user_row = get_user_by_username(conn_temp, current_username)
@@ -559,7 +559,7 @@ else:
         st.error("User not found. Log in again.")
         st.session_state["logged_in"] = False
         st.session_state["current_user"] = None
-        st.experimental_rerun()
+        safe_rerun()
 
     user_id = user_row["id"]
     role = user_row["role"] or "Casting Director"
@@ -571,7 +571,7 @@ else:
         st.session_state["logged_in"] = False
         st.session_state["current_user"] = None
         st.session_state["current_project_name"] = None
-        st.experimental_rerun()
+        safe_rerun()
 
     st.sidebar.subheader("Modes")
     try:
@@ -583,13 +583,11 @@ else:
     with db_connect() as conn:
         projects = list_projects_for_user(conn, user_id)
     if not projects:
-        # create default project if none
         with db_transaction() as conn:
             create_project(conn, user_id, DEFAULT_PROJECT_NAME, "")
         with db_connect() as conn:
             projects = list_projects_for_user(conn, user_id)
 
-    # set default current project name if missing or invalid
     current_project_name = st.session_state.get("current_project_name")
     project_names = [p["name"] for p in projects]
     if current_project_name not in project_names:
@@ -632,7 +630,7 @@ else:
                     """, (pid, number, name, role_in, age, agency, height, waist, dress_suit, availability, photo_path))
                     log_action(current_username, "participant_checkin", name)
                 st.success("✅ Thanks for checking in!")
-                st.experimental_rerun()
+                safe_rerun()
 
     # Casting manager mode
     else:
@@ -666,7 +664,7 @@ else:
                                     log_action(current_username, "create_project", p_name)
                                     st.success(f"Project '{p_name}' created.")
                                     st.session_state["current_project_name"] = p_name
-                                    st.experimental_rerun()
+                                    safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to create project: {e}")
 
@@ -676,7 +674,6 @@ else:
         proj_items = []
         for r in proj_rows:
             project_id = r["id"]
-            # count participants
             with db_connect() as conn:
                 c = conn.cursor()
                 c.execute("SELECT COUNT(*) as cnt FROM participants WHERE project_id=?", (project_id,))
@@ -712,13 +709,13 @@ else:
             a1, a2, a3 = cols[4].columns([1,1,1])
             if a1.button("Set Active", key=f"setactive_{name}"):
                 st.session_state["current_project_name"] = name
-                st.experimental_rerun()
+                safe_rerun()
             if a2.button("Edit", key=f"editproj_{name}"):
                 st.session_state["editing_project"] = name
-                st.experimental_rerun()
+                safe_rerun()
             if a3.button("Delete", key=f"delproj_{name}"):
                 st.session_state["confirm_delete_project"] = name
-                st.experimental_rerun()
+                safe_rerun()
 
             # inline edit
             if st.session_state.get("editing_project") == name:
@@ -738,21 +735,19 @@ else:
                                     if not proj:
                                         st.error("Project not found")
                                     else:
-                                        # update name & description
                                         conn.execute("UPDATE projects SET name=?, description=? WHERE id=?", (new_name, new_desc, proj["id"]))
-                                        # move media
                                         rename_project_move_media(name, new_name, current_username)
                                         log_action(current_username, "edit_project", f"{name} -> {new_name}")
                                 st.success("Project updated.")
                                 st.session_state["editing_project"] = None
                                 if st.session_state.get("current_project_name") == name:
                                     st.session_state["current_project_name"] = new_name
-                                st.experimental_rerun()
+                                safe_rerun()
                             except Exception as e:
                                 st.error(f"Unable to save project: {e}")
                     if cancel_edit:
                         st.session_state["editing_project"] = None
-                        st.experimental_rerun()
+                        safe_rerun()
 
             # delete confirmation
             if st.session_state.get("confirm_delete_project") == name:
@@ -766,13 +761,11 @@ else:
                         if confirm_text == name:
                             try:
                                 with db_transaction() as conn:
-                                    # find project id
                                     proj = get_project_by_name(conn, user_id, name)
                                     if not proj:
                                         st.error("Project not found")
                                     else:
                                         pid = proj["id"]
-                                        # delete participants and their media
                                         c = conn.cursor()
                                         c.execute("SELECT photo_path FROM participants WHERE project_id=?", (pid,))
                                         rows = c.fetchall()
@@ -781,31 +774,27 @@ else:
                                             if isinstance(pf, str) and os.path.exists(pf):
                                                 remove_media_file(pf)
                                         c.execute("DELETE FROM participants WHERE project_id=?", (pid,))
-                                        # delete project row
                                         c.execute("DELETE FROM projects WHERE id=?", (pid,))
-                                        # delete project media folder
                                         delete_project_media(current_username, name)
                                         log_action(current_username, "delete_project", name)
                                 st.success(f"Project '{name}' deleted.")
                                 if st.session_state.get("current_project_name") == name:
                                     st.session_state["current_project_name"] = None
                                 st.session_state["confirm_delete_project"] = None
-                                st.experimental_rerun()
+                                safe_rerun()
                             except Exception as e:
                                 st.error(f"Unable to delete project: {e}")
                         else:
                             st.error("Project name mismatch. Not deleted.")
                     if cancel_delete:
                         st.session_state["confirm_delete_project"] = None
-                        st.experimental_rerun()
+                        safe_rerun()
 
         # Participant management UI
         current = st.session_state["current_project_name"]
-        # load project id
         with db_connect() as conn:
             proj = get_project_by_name(conn, user_id, current)
         if not proj:
-            # ensure project exists
             with db_transaction() as conn:
                 create_project(conn, user_id, current, "")
             with db_connect() as conn:
@@ -839,7 +828,7 @@ else:
                             """, (project_id, number, pname, prole, page, pagency, pheight, pwaist, pdress, pavail, photo_path))
                             log_action(current_username, "add_participant", pname)
                         st.success("Participant added!")
-                        st.experimental_rerun()
+                        safe_rerun()
                     except Exception as e:
                         st.error(f"Unable to add participant: {e}")
 
@@ -882,7 +871,6 @@ else:
                 e_btn, d_btn = cols[2], cols[3]
 
                 if e_btn.button("Edit", key=f"edit_{pid}"):
-                    # edit form in modal-like container (simpler: render inline form)
                     with st.form(f"edit_participant_{pid}"):
                         enumber = st.text_input("Number", value=p["number"] or "")
                         ename = st.text_input("Name", value=p["name"] or "")
@@ -899,11 +887,9 @@ else:
                         if save_edit:
                             try:
                                 with db_transaction() as conn:
-                                    # save new photo and remove old
                                     new_photo_path = p["photo_path"]
                                     if ephoto:
                                         new_photo_path = save_photo_file(ephoto, current_username, current)
-                                        # remove old media if exists
                                         oldphoto = p["photo_path"]
                                         if isinstance(oldphoto, str) and os.path.exists(oldphoto):
                                             remove_media_file(oldphoto)
@@ -913,22 +899,21 @@ else:
                                     """, (enumber, ename, erole, eage, eagency, eheight, ewaist, edress, eavail, new_photo_path, pid))
                                     log_action(current_username, "edit_participant", ename)
                                 st.success("Participant updated!")
-                                st.experimental_rerun()
+                                safe_rerun()
                             except Exception as e:
                                 st.error(f"Unable to save participant edits: {e}")
                         if cancel_edit:
-                            st.experimental_rerun()
+                            safe_rerun()
 
                 if d_btn.button("Delete", key=f"del_{pid}"):
                     try:
                         with db_transaction() as conn:
-                            # remove media file
                             if isinstance(p["photo_path"], str) and os.path.exists(p["photo_path"]):
                                 remove_media_file(p["photo_path"])
                             conn.execute("DELETE FROM participants WHERE id=?", (pid,))
                             log_action(current_username, "delete_participant", p["name"] or "")
                         st.warning("Participant deleted")
-                        st.experimental_rerun()
+                        safe_rerun()
                     except Exception as e:
                         st.error(f"Unable to delete participant: {e}")
 
@@ -995,7 +980,7 @@ else:
         if role == "Admin":
             st.header("👑 Admin Dashboard")
             if st.button("🔄 Refresh Users"):
-                st.experimental_rerun()
+                safe_rerun()
 
             with db_connect() as conn:
                 cur = conn.cursor()
@@ -1039,7 +1024,7 @@ else:
                             conn.execute("UPDATE users SET role=? WHERE username=?", (role_sel, uname))
                             log_action(current_username, "change_role", f"{uname} -> {role_sel}")
                         st.success(f"Role updated for {uname}.")
-                        st.experimental_rerun()
+                        safe_rerun()
                     except Exception as e:
                         st.error(f"Unable to change role: {e}")
 
@@ -1048,7 +1033,6 @@ else:
                         st.error("Cannot delete built-in admin.")
                     else:
                         try:
-                            # remove user's media directory
                             user_media = os.path.join(MEDIA_DIR, _sanitize_for_path(uname))
                             if os.path.exists(user_media):
                                 shutil.rmtree(user_media)
@@ -1056,14 +1040,11 @@ else:
                             pass
                         try:
                             with db_transaction() as conn:
-                                # delete participants -> projects -> user
-                                # first find user id
                                 cur = conn.cursor()
                                 cur.execute("SELECT id FROM users WHERE username=?", (uname,))
                                 r = cur.fetchone()
                                 if r:
                                     uid = r["id"]
-                                    # delete participants media
                                     cur.execute("SELECT photo_path FROM participants WHERE project_id IN (SELECT id FROM projects WHERE user_id=?)", (uid,))
                                     for rr in cur.fetchall():
                                         pf = rr["photo_path"]
@@ -1074,6 +1055,6 @@ else:
                                     cur.execute("DELETE FROM users WHERE id=?", (uid,))
                                     log_action(current_username, "delete_user", uname)
                             st.warning(f"User {uname} deleted.")
-                            st.experimental_rerun()
+                            safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to delete user: {e}")

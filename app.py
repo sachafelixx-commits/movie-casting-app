@@ -376,3 +376,175 @@ else:
                 if cancel_delete:
                     st.session_state["confirm_delete_project"] = None
                     safe_rerun()
+        st.markdown("---")
+
+        # ------------------------
+        # Participant Management
+        # ------------------------
+        current = st.session_state["current_project"]
+        proj_block = projects.get(current, _default_project_block())
+        project_data = proj_block.get("participants", [])
+
+        st.header(f"👥 Participants — {current}")
+
+        # Add New Participant
+        with st.expander("➕ Add New Participant"):
+            with st.form("add_participant"):
+                number = st.text_input("Number")
+                name = st.text_input("Name")
+                role_input = st.text_input("Role")
+                age = st.text_input("Age")
+                agency = st.text_input("Agency")
+                height = st.text_input("Height")
+                waist = st.text_input("Waist")
+                dress_suit = st.text_input("Dress/Suit")
+                availability = st.text_input("Next Availability")
+                photo = st.file_uploader("Upload Photo", type=["jpg", "jpeg", "png"])
+                submitted = st.form_submit_button("Add Participant")
+
+                if submitted:
+                    entry = {
+                        "number": number,
+                        "name": name,
+                        "role": role_input,
+                        "age": age,
+                        "agency": agency,
+                        "height": height,
+                        "waist": waist,
+                        "dress_suit": dress_suit,
+                        "availability": availability,
+                        "photo": photo_to_b64(photo) if photo else None
+                    }
+                    project_data.append(entry)
+                    projects[current]["participants"] = project_data
+                    users[current_user]["projects"] = projects
+                    save_users(users)
+                    st.success("Participant added!")
+                    log_action(current_user, "add_participant", name)
+                    safe_rerun()
+
+        if not project_data:
+            st.info("No participants yet.")
+        else:
+            for idx, p in enumerate(project_data):
+                with st.container():
+                    cols = st.columns([1, 2, 2])
+                    # Display photo
+                    if p.get("photo"):
+                        try:
+                            img = Image.open(io.BytesIO(b64_to_photo(p["photo"])))
+                            cols[0].image(img, width=100)
+                        except Exception:
+                            cols[0].write("Invalid Photo")
+                    else:
+                        cols[0].write("No Photo")
+
+                    # Display participant info
+                    cols[1].markdown(
+                        f"**{p.get('name','Unnamed')}** (#{p.get('number','')})  \n"
+                        f"Role: {p.get('role','')} | Age: {p.get('age','')}  \n"
+                        f"Agency: {p.get('agency','')}  \n"
+                        f"Height: {p.get('height','')} | Waist: {p.get('waist','')} | Dress/Suit: {p.get('dress_suit','')}  \n"
+                        f"Availability: {p.get('availability','')}"
+                    )
+
+                    # Edit / Delete buttons
+                    edit_btn, delete_btn = cols[2].columns(2)
+                    if edit_btn.button("Edit", key=f"edit_{idx}"):
+                        with st.form(f"edit_participant_form_{idx}"):
+                            number_e = st.text_input("Number", value=p.get("number",""))
+                            name_e = st.text_input("Name", value=p.get("name",""))
+                            role_e = st.text_input("Role", value=p.get("role",""))
+                            age_e = st.text_input("Age", value=p.get("age",""))
+                            agency_e = st.text_input("Agency", value=p.get("agency",""))
+                            height_e = st.text_input("Height", value=p.get("height",""))
+                            waist_e = st.text_input("Waist", value=p.get("waist",""))
+                            dress_suit_e = st.text_input("Dress/Suit", value=p.get("dress_suit",""))
+                            availability_e = st.text_input("Next Availability", value=p.get("availability",""))
+                            photo_e = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"])
+                            save_edit = st.form_submit_button("Save")
+                            cancel_edit = st.form_submit_button("Cancel")
+
+                            if save_edit:
+                                p.update({
+                                    "number": number_e,
+                                    "name": name_e,
+                                    "role": role_e,
+                                    "age": age_e,
+                                    "agency": agency_e,
+                                    "height": height_e,
+                                    "waist": waist_e,
+                                    "dress_suit": dress_suit_e,
+                                    "availability": availability_e,
+                                    "photo": photo_to_b64(photo_e) if photo_e else p.get("photo")
+                                })
+                                projects[current]["participants"] = project_data
+                                users[current_user]["projects"] = projects
+                                save_users(users)
+                                st.success("Participant updated!")
+                                log_action(current_user, "edit_participant", name_e)
+                                safe_rerun()
+                            if cancel_edit:
+                                safe_rerun()
+
+                    if delete_btn.button("Delete", key=f"del_{idx}"):
+                        project_data.pop(idx)
+                        projects[current]["participants"] = project_data
+                        users[current_user]["projects"] = projects
+                        save_users(users)
+                        st.warning("Participant deleted")
+                        log_action(current_user, "delete_participant", p.get("name",""))
+                        safe_rerun()
+
+        # ------------------------
+        # Export Participants to Word
+        # ------------------------
+        st.subheader("📄 Export Participants (Word)")
+        if st.button("Download Word File of Current Project"):
+            if project_data:
+                doc = Document()
+                doc.add_heading(f"Participants - {current}", 0)
+                for p in project_data:
+                    table = doc.add_table(rows=1, cols=2)
+                    table.autofit = False
+                    table.columns[0].width = Inches(1.7)
+                    table.columns[1].width = Inches(4.5)
+                    row_cells = table.rows[0].cells
+
+                    if p.get("photo"):
+                        try:
+                            image_stream = io.BytesIO(b64_to_photo(p["photo"]))
+                            paragraph = row_cells[0].paragraphs[0]
+                            run = paragraph.add_run()
+                            run.add_picture(image_stream, width=Inches(1.5))
+                        except Exception:
+                            row_cells[0].text = "Photo Error"
+                    else:
+                        row_cells[0].text = "No Photo"
+
+                    info_text = (
+                        f"Number: {p.get('number','')}\n"
+                        f"Name: {p.get('name','')}\n"
+                        f"Role: {p.get('role','')}\n"
+                        f"Age: {p.get('age','')}\n"
+                        f"Agency: {p.get('agency','')}\n"
+                        f"Height: {p.get('height','')}\n"
+                        f"Waist: {p.get('waist','')}\n"
+                        f"Dress/Suit: {p.get('dress_suit','')}\n"
+                        f"Next Available: {p.get('availability','')}"
+                    )
+                    row_cells[1].text = info_text
+                    doc.add_paragraph("\n")
+
+                word_stream = io.BytesIO()
+                doc.save(word_stream)
+                word_stream.seek(0)
+
+                st.download_button(
+                    label="Click to download Word file",
+                    data=word_stream,
+                    file_name=f"{current}_participants.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
+            else:
+                st.info("No participants in this project yet.")

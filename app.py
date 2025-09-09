@@ -20,66 +20,53 @@ from contextlib import contextmanager
 st.set_page_config(page_title="Sacha's Casting Manager (Responsive)", layout="wide")
 
 DB_FILE = "data.db"
-USERS_JSON = "users.json"   # used only for migration
+USERS_JSON = "users.json"
 MEDIA_DIR = "media"
 MIGRATION_MARKER = os.path.join(MEDIA_DIR, ".db_migrated")
 DEFAULT_PROJECT_NAME = "Default Project"
-
-# SQLite pragmas
-PRAGMA_WAL = "WAL"
 PRAGMA_SYNCHRONOUS = "NORMAL"
 
 # ========================
-# Inject mobile-friendly meta + responsive CSS
+# Inject safe responsive CSS (single injection)
 # ========================
 st.markdown(
     """
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-    /* Bigger, touch-friendly buttons */
-    .stButton>button, button {
-      padding: .6rem 1rem !important;
-      font-size: 1rem !important;
+    /* Layout container */
+    .block-container{max-width:1200px; padding-left:1rem; padding-right:1rem;}
+
+    /* Buttons touch-friendly */
+    .stButton>button, button{padding:.6rem 1rem !important; font-size:1rem !important;}
+
+    /* Participant card */
+    .participant-card{display:flex;flex-wrap:wrap;align-items:flex-start;gap:12px;margin-bottom:12px;padding:12px;border-radius:10px;border:1px solid rgba(0,0,0,0.06);background:#fff;box-shadow:0 1px 4px rgba(0,0,0,0.04)}
+    .participant-photo{flex:0 0 96px}
+    .participant-photo img{width:96px;height:96px;object-fit:cover;border-radius:8px}
+    .participant-info{flex:1 1 220px;min-width:160px}
+    .participant-meta{color:rgba(0,0,0,0.55);font-size:0.95rem;margin-top:6px}
+
+    /* Project row helpers */
+    .project-row{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid rgba(0,0,0,0.03)}
+    .project-name{flex:3}
+    .project-desc{flex:4}
+    .project-created{flex:2}
+    .project-count{flex:1}
+    .project-actions{flex:3;display:flex;gap:8px}
+
+    /* Responsive tweaks */
+    @media (max-width:900px){
+      .block-container{padding-left:0.6rem;padding-right:0.6rem}
+      .participant-photo{flex-basis:72px}
+      .participant-photo img{width:72px;height:72px}
+    }
+    @media (max-width:600px){
+      .participant-card{flex-direction:row}
+      .participant-info{min-width:140px}
+      h1{font-size:1.3rem}
     }
 
-    /* Participant card simple styling */
-    .part-row {
-      display:flex;
-      flex-wrap:wrap;
-      align-items:flex-start;
-      gap:12px;
-      margin-bottom:12px;
-      padding:10px;
-      border-radius:8px;
-      border:1px solid rgba(0,0,0,0.06);
-      background:#fff;
-    }
-    .part-photo { flex:0 0 100px; }
-    .part-info { flex:1 1 200px; min-width:160px; }
-
-    /* Collapsible behavior for small screens */
-    @media (max-width:700px) {
-      .part-row { flex-direction:row; }
-      .part-photo { flex-basis:80px; }
-      .block-container { padding-left:0.6rem; padding-right:0.6rem; }
-      h1 { font-size:1.4rem; }
-      h2 { font-size:1.1rem; }
-    }
-
-    /* Make sidebar areas a bit roomier on mobile (best-effort selector) */
-    @media (max-width:900px) {
-      .css-1lsmgbg.e1fqkh3o2 { padding:0.4rem 0.6rem; }
-    }
-
-    /* Improve table-like project header alignment */
-    .project-row { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:8px 0; border-bottom:1px solid rgba(0,0,0,0.02); }
-    .project-name { flex:3; }
-    .project-desc { flex:4; }
-    .project-created { flex:2; }
-    .project-count { flex:1; }
-    .project-actions { flex:3; display:flex; gap:8px; }
-    /* ensure images scale */
-    img { max-width:100% !important; height:auto !important; }
+    img{max-width:100% !important;height:auto !important}
     </style>
     """,
     unsafe_allow_html=True,
@@ -88,48 +75,22 @@ st.markdown(
 # ========================
 # Utilities
 # ========================
+
 def _sanitize_for_path(s: str) -> str:
     if not isinstance(s, str):
         s = str(s)
     s = s.strip()
     return re.sub(r"[^0-9A-Za-z\-_]+", "_", s)
 
+
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
+
 
 def ensure_media_dir():
     os.makedirs(MEDIA_DIR, exist_ok=True)
 
-def looks_like_base64_image(s: str) -> bool:
-    if not isinstance(s, str):
-        return False
-    if len(s) < 120:
-        return False
-    if os.path.exists(s):
-        return False
-    if re.fullmatch(r"[A-Za-z0-9+/=\r\n]+", s):
-        return True
-    return False
 
-# -------------------------
-# safe_rerun helper
-# -------------------------
-def safe_rerun():
-    """Try to re-run the Streamlit script without raising an exception if not allowed."""
-    try:
-        st.experimental_rerun()
-        return
-    except Exception:
-        pass
-    try:
-        st.rerun()
-        return
-    except Exception:
-        pass
-    st.session_state["_needs_refresh"] = not st.session_state.get("_needs_refresh", False)
-    return
-
-# save uploaded file bytes to media/<username>/<project>/<uuid>.<ext>
 def save_photo_file(uploaded_file, username: str, project_name: str) -> str:
     if not uploaded_file:
         return None
@@ -138,17 +99,12 @@ def save_photo_file(uploaded_file, username: str, project_name: str) -> str:
     project_safe = _sanitize_for_path(project_name)
     user_dir = os.path.join(MEDIA_DIR, user_safe, project_safe)
     os.makedirs(user_dir, exist_ok=True)
-    orig_name = getattr(uploaded_file, "name", None) or ""
+    orig_name = getattr(uploaded_file, "name", "")
     _, ext = os.path.splitext(orig_name)
     ext = ext.lower() if ext else ""
     if not ext:
         typ = getattr(uploaded_file, "type", "") or ""
-        if "jpeg" in typ or "jpg" in typ:
-            ext = ".jpg"
-        elif "png" in typ:
-            ext = ".png"
-        else:
-            ext = ".jpg"
+        ext = ".jpg" if "jpeg" in typ or "jpg" in typ else (".png" if "png" in typ else ".jpg")
     filename = f"{uuid.uuid4().hex}{ext}"
     path = os.path.join(user_dir, filename)
     try:
@@ -163,65 +119,10 @@ def save_photo_file(uploaded_file, username: str, project_name: str) -> str:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        return path.replace("\\", "/")
+        return path.replace("\", "/")
     except Exception:
         return None
 
-def save_photo_bytes(bytes_data: bytes, username: str, project_name: str, ext_hint: str = ".jpg") -> str:
-    if not bytes_data:
-        return None
-    ensure_media_dir()
-    user_safe = _sanitize_for_path(username)
-    project_safe = _sanitize_for_path(project_name)
-    user_dir = os.path.join(MEDIA_DIR, user_safe, project_safe)
-    os.makedirs(user_dir, exist_ok=True)
-    ext = ".jpg"
-    try:
-        buf = io.BytesIO(bytes_data)
-        buf.seek(0)
-        img = Image.open(buf)
-        fmt = (img.format or "").lower()
-        if fmt in ("jpeg","jpg"):
-            ext = ".jpg"
-        elif fmt == "png":
-            ext = ".png"
-        elif fmt == "gif":
-            ext = ".gif"
-        elif fmt == "webp":
-            ext = ".webp"
-        else:
-            ext = ext_hint if ext_hint.startswith(".") else "."+ext_hint
-    except Exception:
-        ext = ext_hint if ext_hint.startswith(".") else "."+ext_hint
-    filename = f"{uuid.uuid4().hex}{ext}"
-    path = os.path.join(user_dir, filename)
-    try:
-        with open(path, "wb") as f:
-            f.write(bytes_data)
-            f.flush()
-            os.fsync(f.fileno())
-        return path.replace("\\", "/")
-    except Exception:
-        return None
-
-def remove_media_file(path: str):
-    try:
-        if not path:
-            return
-        if isinstance(path, str) and os.path.exists(path) and os.path.commonpath([os.path.abspath(path), os.path.abspath(MEDIA_DIR)]) == os.path.abspath(MEDIA_DIR):
-            os.remove(path)
-            parent = os.path.dirname(path)
-            while parent and os.path.abspath(parent) != os.path.abspath(MEDIA_DIR):
-                try:
-                    if not os.listdir(parent):
-                        os.rmdir(parent)
-                        parent = os.path.dirname(parent)
-                    else:
-                        break
-                except Exception:
-                    break
-    except Exception:
-        pass
 
 def get_photo_bytes(photo_field):
     if not photo_field:
@@ -240,13 +141,14 @@ def get_photo_bytes(photo_field):
     return None
 
 # ========================
-# SQLite helpers
+# DB helpers
 # ========================
+
 def db_connect():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
     try:
+        cur = conn.cursor()
         cur.execute("PRAGMA journal_mode = WAL;")
         cur.execute(f"PRAGMA synchronous = {PRAGMA_SYNCHRONOUS};")
     except Exception:
@@ -254,6 +156,7 @@ def db_connect():
     return conn
 
 @contextmanager
+
 def db_transaction():
     conn = db_connect()
     try:
@@ -264,6 +167,7 @@ def db_transaction():
         raise
     finally:
         conn.close()
+
 
 def init_db():
     if os.path.exists(DB_FILE):
@@ -285,8 +189,7 @@ def init_db():
                 user_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
                 description TEXT,
-                created_at TEXT,
-                FOREIGN KEY (user_id) REFERENCES users(id)
+                created_at TEXT
             );
         """)
         c.execute("""
@@ -302,8 +205,7 @@ def init_db():
                 waist TEXT,
                 dress_suit TEXT,
                 availability TEXT,
-                photo_path TEXT,
-                FOREIGN KEY (project_id) REFERENCES projects(id)
+                photo_path TEXT
             );
         """)
         c.execute("""
@@ -315,13 +217,14 @@ def init_db():
                 details TEXT
             );
         """)
+
         c.execute("CREATE INDEX idx_projects_user ON projects(user_id);")
         c.execute("CREATE INDEX idx_participants_project ON participants(project_id);")
-        conn.commit()
 
 # ------------------------
-# log_action - needed early
+# logging
 # ------------------------
+
 def log_action(user, action, details=""):
     try:
         with db_transaction() as conn:
@@ -333,8 +236,9 @@ def log_action(user, action, details=""):
         pass
 
 # ========================
-# Migration from users.json
+# Migration (kept minimal)
 # ========================
+
 def migrate_from_json_if_needed():
     if os.path.exists(MIGRATION_MARKER):
         return
@@ -342,44 +246,37 @@ def migrate_from_json_if_needed():
         try:
             ensure_media_dir()
             with open(MIGRATION_MARKER, "w", encoding="utf-8") as f:
-                f.write(f"no_users_json_at={datetime.now().isoformat()}\n")
+                f.write(f"no_users_json_at={datetime.now().isoformat()}
+")
         except Exception:
             pass
         return
-
     try:
         with open(USERS_JSON, "r", encoding="utf-8") as f:
             users = json.load(f)
     except Exception:
         users = {}
-
     if not isinstance(users, dict) or not users:
         try:
             ensure_media_dir()
             with open(MIGRATION_MARKER, "w", encoding="utf-8") as f:
-                f.write(f"empty_or_invalid_users_json_at={datetime.now().isoformat()}\n")
+                f.write(f"empty_or_invalid_users_json_at={datetime.now().isoformat()}
+")
         except Exception:
             pass
         return
-
+    # perform light migration into sqlite
     init_db()
-
     with db_transaction() as conn:
         c = conn.cursor()
         for uname, info in users.items():
-            if not isinstance(info, dict):
-                continue
             pw = info.get("password") or ""
-            role = info.get("role") or "Casting Director"
-            last_login = info.get("last_login")
             if pw and len(pw) != 64:
                 pw = hash_password(pw)
-            if uname == "admin" and pw == "":
-                pw = hash_password("supersecret")
-                role = "Admin"
+            role = info.get("role") or "Casting Director"
+            last_login = info.get("last_login")
             try:
-                c.execute("INSERT INTO users (username, password, role, last_login) VALUES (?, ?, ?, ?)",
-                          (uname, pw or hash_password(""), role, last_login))
+                c.execute("INSERT INTO users (username, password, role, last_login) VALUES (?, ?, ?, ?)", (uname, pw or hash_password(""), role, last_login))
                 user_id = c.lastrowid
             except sqlite3.IntegrityError:
                 c.execute("SELECT id FROM users WHERE username=?", (uname,))
@@ -387,71 +284,36 @@ def migrate_from_json_if_needed():
                 user_id = row["id"] if row else None
             if user_id:
                 projects = info.get("projects", {}) or {}
-                if not isinstance(projects, dict) or not projects:
-                    projects = {DEFAULT_PROJECT_NAME: {"description":"", "created_at": datetime.now().isoformat(), "participants":[]}}
                 for pname, pblock in projects.items():
-                    if not isinstance(pblock, dict):
-                        continue
-                    desc = pblock.get("description", "")
-                    created_at = pblock.get("created_at") or datetime.now().isoformat()
                     try:
-                        c.execute("INSERT INTO projects (user_id, name, description, created_at) VALUES (?, ?, ?, ?)",
-                                  (user_id, pname, desc, created_at))
+                        c.execute("INSERT INTO projects (user_id, name, description, created_at) VALUES (?, ?, ?, ?)", (user_id, pname, pblock.get("description",""), pblock.get("created_at", datetime.now().isoformat())))
                         project_id = c.lastrowid
                     except sqlite3.IntegrityError:
                         c.execute("SELECT id FROM projects WHERE user_id=? AND name=?", (user_id, pname))
                         prow = c.fetchone()
                         project_id = prow["id"] if prow else None
                     if project_id:
-                        participants = pblock.get("participants", []) or []
-                        for entrant in participants:
-                            if not isinstance(entrant, dict):
-                                continue
-                            photo_field = entrant.get("photo")
-                            final_path = None
-                            if isinstance(photo_field, str) and os.path.exists(photo_field):
-                                final_path = photo_field
-                            elif looks_like_base64_image(photo_field):
-                                try:
-                                    bytes_data = base64.b64decode(photo_field)
-                                    final_path = save_photo_bytes(bytes_data, uname, pname)
-                                except Exception:
-                                    final_path = None
-                            else:
-                                final_path = None
-                            c.execute("""
-                                INSERT INTO participants
-                                (project_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (
+                        for entrant in pblock.get("participants", []) or []:
+                            c.execute("INSERT INTO participants (project_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
                                 project_id,
-                                entrant.get("number"),
-                                entrant.get("name"),
-                                entrant.get("role"),
-                                entrant.get("age"),
-                                entrant.get("agency"),
-                                entrant.get("height"),
-                                entrant.get("waist"),
-                                entrant.get("dress_suit"),
-                                entrant.get("availability"),
-                                final_path
+                                entrant.get("number"), entrant.get("name"), entrant.get("role"), entrant.get("age"), entrant.get("agency"), entrant.get("height"), entrant.get("waist"), entrant.get("dress_suit"), entrant.get("availability"), None
                             ))
     try:
         ensure_media_dir()
         with open(MIGRATION_MARKER, "w", encoding="utf-8") as f:
-            f.write(f"migrated_at={datetime.now().isoformat()}\n")
+            f.write(f"migrated_at={datetime.now().isoformat()}
+")
     except Exception:
         pass
 
-# ========================
-# Initialize DB + migrate once
-# ========================
+# Initialize DB + migration
 init_db()
 migrate_from_json_if_needed()
 
 # ========================
-# Small helpers for app DB ops
+# Small DB helpers
 # ========================
+
 def get_user_by_username(conn, username):
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE username=?", (username,))
@@ -460,8 +322,7 @@ def get_user_by_username(conn, username):
 def create_user(conn, username, password_hash, role="Casting Director"):
     c = conn.cursor()
     now = datetime.now().isoformat()
-    c.execute("INSERT INTO users (username, password, role, last_login) VALUES (?, ?, ?, ?)",
-              (username, password_hash, role, now))
+    c.execute("INSERT INTO users (username, password, role, last_login) VALUES (?, ?, ?, ?)", (username, password_hash, role, now))
     return c.lastrowid
 
 def update_user_last_login(conn, user_id):
@@ -477,35 +338,13 @@ def list_projects_for_user(conn, user_id):
 def create_project(conn, user_id, name, description=""):
     c = conn.cursor()
     now = datetime.now().isoformat()
-    c.execute("INSERT INTO projects (user_id, name, description, created_at) VALUES (?, ?, ?, ?)",
-              (user_id, name, description, now))
+    c.execute("INSERT INTO projects (user_id, name, description, created_at) VALUES (?, ?, ?, ?)", (user_id, name, description, now))
     return c.lastrowid
 
 def get_project_by_name(conn, user_id, name):
     c = conn.cursor()
     c.execute("SELECT * FROM projects WHERE user_id=? AND name=?", (user_id, name))
     return c.fetchone()
-
-def rename_project_move_media(old_name, new_name, username):
-    old_dir = os.path.join(MEDIA_DIR, _sanitize_for_path(username), _sanitize_for_path(old_name))
-    new_dir = os.path.join(MEDIA_DIR, _sanitize_for_path(username), _sanitize_for_path(new_name))
-    try:
-        if os.path.exists(old_dir):
-            os.makedirs(new_dir, exist_ok=True)
-            for f in os.listdir(old_dir):
-                oldp = os.path.join(old_dir, f)
-                newp = os.path.join(new_dir, f)
-                try:
-                    shutil.move(oldp, newp)
-                except Exception:
-                    pass
-            try:
-                if not os.listdir(old_dir):
-                    os.rmdir(old_dir)
-            except Exception:
-                pass
-    except Exception:
-        pass
 
 def delete_project_media(username, project_name):
     proj_media_dir = os.path.join(MEDIA_DIR, _sanitize_for_path(username), _sanitize_for_path(project_name))
@@ -516,7 +355,7 @@ def delete_project_media(username, project_name):
         pass
 
 # ========================
-# UI: Auth
+# Session State Init
 # ========================
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
@@ -530,12 +369,12 @@ if "editing_project" not in st.session_state:
     st.session_state["editing_project"] = None
 if "confirm_delete_project" not in st.session_state:
     st.session_state["confirm_delete_project"] = None
-if "_needs_refresh" not in st.session_state:
-    st.session_state["_needs_refresh"] = False
 if "prefill_username" not in st.session_state:
     st.session_state["prefill_username"] = ""
 
-# Top-level title uses larger, mobile-friendly header
+# ========================
+# Auth UI
+# ========================
 if not st.session_state["logged_in"]:
     st.markdown("# 🎬 Sacha's Casting Manager")
     choice = st.radio("Choose an option", ["Login", "Sign Up"], horizontal=True)
@@ -558,7 +397,7 @@ if not st.session_state["logged_in"]:
                 st.session_state["logged_in"] = True
                 st.session_state["current_user"] = "admin"
                 st.success("Logged in as Admin ✅")
-                safe_rerun()
+                st.experimental_rerun()
             try:
                 conn = db_connect()
                 user = get_user_by_username(conn, username)
@@ -572,7 +411,7 @@ if not st.session_state["logged_in"]:
                 st.session_state["logged_in"] = True
                 st.session_state["current_user"] = username
                 st.success(f"Welcome back {username}!")
-                safe_rerun()
+                st.experimental_rerun()
             else:
                 st.error("Invalid credentials")
     else:
@@ -581,7 +420,6 @@ if not st.session_state["logged_in"]:
             new_pass = st.text_input("New Password", type="password")
             role = st.selectbox("Role", ["Casting Director", "Assistant"])
             signup_btn = st.form_submit_button("Sign Up")
-
         if signup_btn:
             if not new_user or not new_pass:
                 st.error("Please provide a username and password")
@@ -600,42 +438,39 @@ if not st.session_state["logged_in"]:
                     st.error(f"Unable to create account: {e}")
 
 # ========================
-# After login: main app
+# Main App
 # ========================
 else:
     current_username = st.session_state["current_user"]
     try:
         conn_temp = db_connect()
-        user_row = get_user_by_username(conn_temp, current_username)
+        cur = conn_temp.cursor()
+        cur.execute("SELECT * FROM users WHERE username=?", (current_username,))
+        user_row = cur.fetchone()
         conn_temp.close()
     except Exception:
         user_row = None
-
     if not user_row:
         st.error("User not found. Log in again.")
         st.session_state["logged_in"] = False
         st.session_state["current_user"] = None
-        safe_rerun()
+        st.experimental_rerun()
 
     user_id = user_row["id"]
     role = user_row["role"] or "Casting Director"
 
-    # Sidebar
     st.sidebar.title("Menu")
     st.sidebar.write(f"Logged in as **{current_username}**")
     if st.sidebar.button("Logout"):
         st.session_state["logged_in"] = False
         st.session_state["current_user"] = None
         st.session_state["current_project_name"] = None
-        safe_rerun()
+        st.experimental_rerun()
 
     st.sidebar.subheader("Modes")
-    try:
-        st.session_state["participant_mode"] = st.sidebar.toggle("Enable Participant Mode (Kiosk)", value=st.session_state.get("participant_mode", False))
-    except Exception:
-        st.session_state["participant_mode"] = st.sidebar.checkbox("Enable Participant Mode (Kiosk)", value=st.session_state.get("participant_mode", False))
+    st.session_state["participant_mode"] = st.sidebar.checkbox("Enable Participant Mode (Kiosk)", value=st.session_state.get("participant_mode", False))
 
-    # load user's projects
+    # ensure projects exist
     with db_connect() as conn:
         projects = list_projects_for_user(conn, user_id)
     if not projects:
@@ -643,10 +478,8 @@ else:
             create_project(conn, user_id, DEFAULT_PROJECT_NAME, "")
         with db_connect() as conn:
             projects = list_projects_for_user(conn, user_id)
-
-    current_project_name = st.session_state.get("current_project_name")
     project_names = [p["name"] for p in projects]
-    if current_project_name not in project_names:
+    if st.session_state.get("current_project_name") not in project_names:
         st.session_state["current_project_name"] = project_names[0] if project_names else DEFAULT_PROJECT_NAME
 
     active = st.session_state["current_project_name"]
@@ -654,7 +487,6 @@ else:
     st.sidebar.subheader("Active Project")
     st.sidebar.write(f"**{active}**")
 
-    # Participant kiosk
     if st.session_state["participant_mode"]:
         st.markdown("# 👋 Casting Check-In")
         st.caption("Fill in your details. Submissions go to the active project.")
@@ -671,28 +503,21 @@ else:
             availability = st.text_input("Next Availability")
             photo = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"])
             submitted = st.form_submit_button("Submit")
-            if submitted:
-                with db_transaction() as conn:
-                    proj = get_project_by_name(conn, user_id, active)
-                    if not proj:
-                        pid = create_project(conn, user_id, active, "")
-                    else:
-                        pid = proj["id"]
-                    photo_path = save_photo_file(photo, current_username, active) if photo else None
-                    conn.execute("""
-                        INSERT INTO participants
-                        (project_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (pid, number, name, role_in, age, agency, height, waist, dress_suit, availability, photo_path))
-                    log_action(current_username, "participant_checkin", name)
-                st.success("✅ Thanks for checking in!")
-                safe_rerun()
+        if submitted:
+            with db_transaction() as conn:
+                proj = get_project_by_name(conn, user_id, active)
+                if not proj:
+                    pid = create_project(conn, user_id, active, "")
+                else:
+                    pid = proj["id"]
+                photo_path = save_photo_file(photo, current_username, active) if photo else None
+                conn.execute("INSERT INTO participants (project_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (pid, number, name, role_in, age, agency, height, waist, dress_suit, availability, photo_path))
+                log_action(current_username, "participant_checkin", name)
+            st.success("✅ Thanks for checking in!")
+            st.experimental_rerun()
 
-    # Casting manager mode
     else:
         st.markdown("# 🎬 Sacha's Casting Manager")
-
-        # Project Manager UI
         st.header("📁 Project Manager")
         pm_col1, pm_col2 = st.columns([3,2])
         with pm_col1:
@@ -724,7 +549,6 @@ else:
                     except Exception as e:
                         st.error(f"Unable to create project: {e}")
 
-        # fetch fresh projects
         with db_connect() as conn:
             proj_rows = list_projects_for_user(conn, user_id)
         proj_items = []
@@ -751,11 +575,9 @@ else:
         elif sort_opt == "Fewest Participants":
             proj_items.sort(key=lambda x: x[3])
 
-        # header
         hdr = st.columns([3,4,2,2,4])
         hdr[0].markdown("**Project**"); hdr[1].markdown("**Description**"); hdr[2].markdown("**Created**"); hdr[3].markdown("**Participants**"); hdr[4].markdown("**Actions**")
 
-        # Render projects list
         for name, desc, created, count in proj_items:
             is_active = (name == st.session_state.get("current_project_name"))
             cols = st.columns([3,4,2,2,4])
@@ -766,13 +588,13 @@ else:
             a1, a2, a3 = cols[4].columns([1,1,1])
             if a1.button("Set Active", key=f"setactive_{name}"):
                 st.session_state["current_project_name"] = name
-                safe_rerun()
+                st.experimental_rerun()
             if a2.button("Edit", key=f"editproj_{name}"):
                 st.session_state["editing_project"] = name
-                safe_rerun()
+                st.experimental_rerun()
             if a3.button("Delete", key=f"delproj_{name}"):
                 st.session_state["confirm_delete_project"] = name
-                safe_rerun()
+                st.experimental_rerun()
 
             # Inline Edit
             if st.session_state.get("editing_project") == name:
@@ -782,7 +604,6 @@ else:
                     c1, c2 = st.columns(2)
                     save_changes = c1.form_submit_button("Save")
                     cancel_edit = c2.form_submit_button("Cancel")
-
                 if save_changes:
                     if not new_name.strip():
                         st.error("Name cannot be empty.")
@@ -794,20 +615,18 @@ else:
                                     st.error("Project not found.")
                                 else:
                                     conn.execute("UPDATE projects SET name=?, description=? WHERE id=?", (new_name.strip(), new_desc, proj["id"]))
-                                    rename_project_move_media(name, new_name.strip(), current_username)
                                     log_action(current_username, "edit_project", f"{name} -> {new_name.strip()}")
                             st.success("Project updated.")
                             st.session_state["editing_project"] = None
                             if st.session_state.get("current_project_name") == name:
                                 st.session_state["current_project_name"] = new_name.strip()
-                            safe_rerun()
+                            st.experimental_rerun()
                         except Exception as e:
                             st.error(f"Unable to save project: {e}")
                 if cancel_edit:
                     st.session_state["editing_project"] = None
-                    safe_rerun()
+                    st.experimental_rerun()
 
-            # Delete confirmation
             if st.session_state.get("confirm_delete_project") == name:
                 st.warning(f"Type the project name **{name}** to confirm deletion. This cannot be undone.")
                 with st.form(f"confirm_delete_{name}"):
@@ -815,7 +634,6 @@ else:
                     cc1, cc2 = st.columns(2)
                     do_delete = cc1.form_submit_button("Delete Permanently")
                     cancel_delete = cc2.form_submit_button("Cancel")
-
                 if do_delete:
                     if confirm_text == name:
                         try:
@@ -831,27 +649,26 @@ else:
                                     for r in rows:
                                         pf = r["photo_path"]
                                         if isinstance(pf, str) and os.path.exists(pf):
-                                            remove_media_file(pf)
+                                            try:
+                                                os.remove(pf)
+                                            except Exception:
+                                                pass
                                     c.execute("DELETE FROM participants WHERE project_id=?", (pid,))
                                     c.execute("DELETE FROM projects WHERE id=?", (pid,))
                                     delete_project_media(current_username, name)
                                     log_action(current_username, "delete_project", name)
                             st.success(f"Project '{name}' deleted.")
-                            if st.session_state.get("current_project_name") == name:
-                                st.session_state["current_project_name"] = None
                             st.session_state["confirm_delete_project"] = None
-                            safe_rerun()
+                            st.experimental_rerun()
                         except Exception as e:
                             st.error(f"Unable to delete project: {e}")
                     else:
                         st.error("Project name mismatch. Not deleted.")
                 if cancel_delete:
                     st.session_state["confirm_delete_project"] = None
-                    safe_rerun()
+                    st.experimental_rerun()
 
-        # ------------------------
-        # Participant Management
-        # ------------------------
+        # Participant management
         current = st.session_state.get("current_project_name", project_names[0] if 'project_names' in locals() and project_names else DEFAULT_PROJECT_NAME)
         with db_connect() as conn:
             proj = get_project_by_name(conn, user_id, current)
@@ -860,10 +677,9 @@ else:
                 create_project(conn, user_id, current, "")
             with db_connect() as conn:
                 proj = get_project_by_name(conn, user_id, current)
-
         project_id = proj["id"]
-        st.header(f"👥 Participants — {current}")
 
+        st.header(f"👥 Participants — {current}")
         with st.expander("➕ Add New Participant"):
             with st.form("add_participant"):
                 number = st.text_input("Number")
@@ -881,18 +697,14 @@ else:
                 try:
                     with db_transaction() as conn:
                         photo_path = save_photo_file(photo, current_username, current) if photo else None
-                        conn.execute("""
-                            INSERT INTO participants
-                            (project_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (project_id, number, pname, prole, page, pagency, pheight, pwaist, pdress, pavail, photo_path))
+                        conn.execute("INSERT INTO participants (project_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (project_id, number, pname, prole, page, pagency, pheight, pwaist, pdress, pavail, photo_path))
                         log_action(current_username, "add_participant", pname)
                     st.success("Participant added!")
-                    safe_rerun()
+                    st.experimental_rerun()
                 except Exception as e:
                     st.error(f"Unable to add participant: {e}")
 
-        # list participants
+        # list participants with improved card look
         with db_connect() as conn:
             cur = conn.cursor()
             cur.execute("SELECT * FROM participants WHERE project_id=? ORDER BY id", (project_id,))
@@ -903,31 +715,23 @@ else:
         else:
             for p in participants:
                 pid = p["id"]
-                # Use a simple responsive HTML block for participant rows so CSS takes effect nicely
+                left_col, right_col = st.columns([5,1])
+                # left: card (HTML for consistent styling)
                 bytes_data = get_photo_bytes(p["photo_path"])
-                photo_html = "<div class='part-photo'>No Photo</div>"
                 if bytes_data:
                     try:
-                        img_b64 = base64.b64encode(bytes_data).decode('utf-8')
-                        # embed small image as base64 for instant mobile-friendly rendering
-                        photo_html = f"<div class='part-photo'><img src='data:image/jpeg;base64,{img_b64}' style='border-radius:6px;max-width:100px;height:auto;'/></div>"
+                        b64 = base64.b64encode(bytes_data).decode('utf-8')
+                        img_tag = f"<img src='data:image/jpeg;base64,{b64}' alt='photo' />"
                     except Exception:
-                        photo_html = "<div class='part-photo'>Invalid Photo</div>"
+                        img_tag = "<div style='width:96px;height:96px;background:#f2f2f2;border-radius:8px;display:flex;align-items:center;justify-content:center'>Invalid</div>"
+                else:
+                    img_tag = "<div style='width:96px;height:96px;background:#f8f8f8;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#777'>No Photo</div>"
 
-                info_text = (
-                    f"<div class='part-info'><strong>{(p['name'] or 'Unnamed')}</strong> (#{(p['number'] or '')})<br/>"
-                    f"Role: {(p['role'] or '')} | Age: {(p['age'] or '')}<br/>"
-                    f"Agency: {(p['agency'] or '')}<br/>"
-                    f"Height: {(p['height'] or '')} | Waist: {(p['waist'] or '')} | Dress/Suit: {(p['dress_suit'] or '')}<br/>"
-                    f"Availability: {(p['availability'] or '')}</div>"
-                )
+                info_html = f"<div class='participant-card'><div class='participant-photo'>{img_tag}</div><div class='participant-info'><div style='font-weight:600;font-size:1.05rem'>{(p['name'] or 'Unnamed')} <span style='color:#666;font-weight:400;font-size:0.9rem'>#{(p['number'] or '')}</span></div><div class='participant-meta'>Role: {(p['role'] or '')} • Age: {(p['age'] or '')} • Agency: {(p['agency'] or '')}</div><div class='participant-meta'>Height: {(p['height'] or '')} • Waist: {(p['waist'] or '')} • Dress/Suit: {(p['dress_suit'] or '')}</div><div class='participant-meta'>Availability: {(p['availability'] or '')}</div></div></div>"
+                left_col.markdown(info_html, unsafe_allow_html=True)
 
-                # actions as Streamlit buttons (they'll remain interactive)
-                cols = st.columns([1,4,1])
-                # left column: photo + info combined via markdown for responsive layout
-                cols[0].markdown(f"<div class='part-row'>{photo_html}{info_text}</div>", unsafe_allow_html=True)
-                # right columns: actions
-                if cols[2].button("Edit", key=f"edit_{pid}"):
+                # right: actions (keep Edit/Delete functionality)
+                if right_col.button("Edit", key=f"edit_{pid}"):
                     with st.form(f"edit_participant_{pid}"):
                         enumber = st.text_input("Number", value=p["number"] or "")
                         ename = st.text_input("Name", value=p["name"] or "")
@@ -949,32 +753,35 @@ else:
                                     new_photo_path = save_photo_file(ephoto, current_username, current)
                                     oldphoto = p["photo_path"]
                                     if isinstance(oldphoto, str) and os.path.exists(oldphoto):
-                                        remove_media_file(oldphoto)
-                                conn.execute("""
-                                    UPDATE participants SET number=?, name=?, role=?, age=?, agency=?, height=?, waist=?, dress_suit=?, availability=?, photo_path=?
-                                    WHERE id=?
-                                """, (enumber, ename, erole, eage, eagency, eheight, ewaist, edress, eavail, new_photo_path, pid))
+                                        try:
+                                            os.remove(oldphoto)
+                                        except Exception:
+                                            pass
+                                conn.execute("UPDATE participants SET number=?, name=?, role=?, age=?, agency=?, height=?, waist=?, dress_suit=?, availability=?, photo_path=? WHERE id=?", (enumber, ename, erole, eage, eagency, eheight, ewaist, edress, eavail, new_photo_path, pid))
                                 log_action(current_username, "edit_participant", ename)
                             st.success("Participant updated!")
-                            safe_rerun()
+                            st.experimental_rerun()
                         except Exception as e:
                             st.error(f"Unable to save participant edits: {e}")
                     if cancel_edit:
-                        safe_rerun()
+                        st.experimental_rerun()
 
-                if cols[2].button("Delete", key=f"del_{pid}"):
+                if right_col.button("Delete", key=f"del_{pid}"):
                     try:
                         with db_transaction() as conn:
                             if isinstance(p["photo_path"], str) and os.path.exists(p["photo_path"]):
-                                remove_media_file(p["photo_path"])
+                                try:
+                                    os.remove(p["photo_path"])
+                                except Exception:
+                                    pass
                             conn.execute("DELETE FROM participants WHERE id=?", (pid,))
                             log_action(current_username, "delete_participant", p["name"] or "")
                         st.warning("Participant deleted")
-                        safe_rerun()
+                        st.experimental_rerun()
                     except Exception as e:
                         st.error(f"Unable to delete participant: {e}")
 
-        # Export to Word
+        # Export to Word (unchanged)
         st.subheader("📄 Export Participants (Word)")
         if st.button("Download Word File of Current Project"):
             try:
@@ -1008,18 +815,27 @@ else:
                                 row_cells[0].text = "No Photo"
 
                             info_text = (
-                                f"Number: {p.get('number','')}\n"
-                                f"Name: {p.get('name','')}\n"
-                                f"Role: {p.get('role','')}\n"
-                                f"Age: {p.get('age','')}\n"
-                                f"Agency: {p.get('agency','')}\n"
-                                f"Height: {p.get('height','')}\n"
-                                f"Waist: {p.get('waist','')}\n"
-                                f"Dress/Suit: {p.get('dress_suit','')}\n"
+                                f"Number: {p.get('number','')}
+"
+                                f"Name: {p.get('name','')}
+"
+                                f"Role: {p.get('role','')}
+"
+                                f"Age: {p.get('age','')}
+"
+                                f"Agency: {p.get('agency','')}
+"
+                                f"Height: {p.get('height','')}
+"
+                                f"Waist: {p.get('waist','')}
+"
+                                f"Dress/Suit: {p.get('dress_suit','')}
+"
                                 f"Next Available: {p.get('availability','')}"
                             )
                             row_cells[1].text = info_text
-                            doc.add_paragraph("\n")
+                            doc.add_paragraph("
+")
 
                         word_stream = io.BytesIO()
                         doc.save(word_stream)
@@ -1030,14 +846,12 @@ else:
                             file_name=f"{current}_participants.docx",
                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                         )
-            except Exception as e:
-                st.error(f"Unable to generate Word file: {e}")
 
-        # Admin dashboard
+        # Admin dashboard (kept minimal)
         if role == "Admin":
             st.header("👑 Admin Dashboard")
             if st.button("🔄 Refresh Users"):
-                safe_rerun()
+                st.experimental_rerun()
 
             with db_connect() as conn:
                 cur = conn.cursor()
@@ -1081,7 +895,7 @@ else:
                             conn.execute("UPDATE users SET role=? WHERE username=?", (role_sel, uname))
                             log_action(current_username, "change_role", f"{uname} -> {role_sel}")
                         st.success(f"Role updated for {uname}.")
-                        safe_rerun()
+                        st.experimental_rerun()
                     except Exception as e:
                         st.error(f"Unable to change role: {e}")
 
@@ -1106,12 +920,16 @@ else:
                                     for rr in cur.fetchall():
                                         pf = rr["photo_path"]
                                         if isinstance(pf, str) and os.path.exists(pf):
-                                            remove_media_file(pf)
+                                            try:
+                                                os.remove(pf)
+                                            except Exception:
+                                                pass
                                     cur.execute("DELETE FROM participants WHERE project_id IN (SELECT id FROM projects WHERE user_id=?)", (uid,))
                                     cur.execute("DELETE FROM projects WHERE user_id=?", (uid,))
                                     cur.execute("DELETE FROM users WHERE id=?", (uid,))
                                     log_action(current_username, "delete_user", uname)
                             st.warning(f"User {uname} deleted.")
-                            safe_rerun()
+                            st.experimental_rerun()
                         except Exception as e:
                             st.error(f"Unable to delete user: {e}")
+

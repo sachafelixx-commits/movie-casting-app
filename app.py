@@ -5,6 +5,9 @@ import io
 import base64
 import time
 import sys
+import uuid
+import shutil
+import re
 from datetime import datetime
 from docx import Document
 from docx.shared import Inches
@@ -22,6 +25,7 @@ st.set_page_config(page_title="Sacha's Casting Manager", layout="wide")
 USERS_FILE = "users.json"
 LOG_FILE = "logs.json"
 DEFAULT_PROJECT_NAME = "Default Project"
+MEDIA_DIR = "media"
 
 # Lock settings
 LOCK_STALE_SECONDS = 30  # consider lock stale after this many seconds
@@ -35,19 +39,15 @@ def _lockfile_name(filename):
     return f"{filename}.lock"
 
 def acquire_file_lock(filename, timeout=LOCK_ACQUIRE_TIMEOUT):
-    """Try to create a .lock file atomically. Wait up to timeout seconds."""
     lockfile = _lockfile_name(filename)
     start = time.time()
     while True:
         try:
-            # Use O_CREAT | O_EXCL to create atomically; fail if exists
             fd = os.open(lockfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             with os.fdopen(fd, "w") as f:
                 f.write(f"{os.getpid()}\n{time.time()}\n")
-            # created lock file successfully
             return True
         except FileExistsError:
-            # check staleness
             try:
                 mtime = os.path.getmtime(lockfile)
                 age = time.time() - mtime
@@ -55,17 +55,14 @@ def acquire_file_lock(filename, timeout=LOCK_ACQUIRE_TIMEOUT):
                     try:
                         os.remove(lockfile)
                     except Exception:
-                        pass  # somebody else removed it
+                        pass
                 else:
-                    # still fresh, wait
                     if time.time() - start > timeout:
                         raise TimeoutError(f"Timeout acquiring lock for {filename}")
                     time.sleep(LOCK_RETRY_DELAY)
             except FileNotFoundError:
-                # race: file disappeared, retry immediately
                 continue
         except Exception as e:
-            # unexpected
             raise
 
 def release_file_lock(filename):
@@ -77,7 +74,6 @@ def release_file_lock(filename):
         pass
 
 def wait_for_no_lock(filename, timeout=LOCK_ACQUIRE_TIMEOUT):
-    """Wait until there's no lock file or lock becomes stale. Raises on timeout."""
     lockfile = _lockfile_name(filename)
     start = time.time()
     while os.path.exists(lockfile):
@@ -99,11 +95,9 @@ def wait_for_no_lock(filename, timeout=LOCK_ACQUIRE_TIMEOUT):
 # JSON Helpers (with locks for writes)
 # ========================
 def load_json(filename, default):
-    """Read JSON file. If file doesn't exist or parse fails, return default."""
     try:
         if not os.path.exists(filename):
             return default
-        # Wait briefly if someone is writing
         wait_for_no_lock(filename)
         with open(filename, "r", encoding="utf-8") as f:
             try:
@@ -111,7 +105,6 @@ def load_json(filename, default):
             except Exception:
                 return default
     except TimeoutError:
-        # If we couldn't wait for lock, still try reading raw (best-effort)
         try:
             with open(filename, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -121,11 +114,9 @@ def load_json(filename, default):
         return default
 
 def save_json(filename, data):
-    """Write JSON file atomically using a lock file to protect concurrent writes."""
     try:
         acquire_file_lock(filename)
     except TimeoutError:
-        # if unable to get lock, raise to notify caller
         raise
     try:
         tmp_name = f"{filename}.tmp"
@@ -133,7 +124,6 @@ def save_json(filename, data):
             json.dump(data, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        # atomic replace
         os.replace(tmp_name, filename)
     finally:
         release_file_lock(filename)
@@ -164,7 +154,6 @@ def _default_project_block():
     }
 
 def log_action(user, action, details=""):
-    # safe append to logs using read-modify-write under lock
     for attempt in range(2):
         try:
             logs = load_logs()
@@ -177,22 +166,8 @@ def log_action(user, action, details=""):
             save_logs(logs)
             return
         except TimeoutError:
-            # brief backoff and retry once
             time.sleep(0.05)
-    # best-effort: if still failing, skip logging to avoid crashing app
-
-def photo_to_b64(file):
-    if not file:
-        return None
-    try:
-        return base64.b64encode(file.read()).decode("utf-8")
-    except Exception:
-        return None
-
-def b64_to_photo(b64_string):
-    if not b64_string:
-        return None
-    return base64.b64decode(b64_string)
+    # best-effort only
 
 def safe_rerun():
     try:
@@ -202,6 +177,125 @@ def safe_rerun():
             st.experimental_rerun()
         except Exception:
             pass
+
+# sanitize strings for filesystem paths
+def _sanitize_for_path(s: str) -> str:
+    if not isinstance(s, str):
+        s = str(s)
+    s = s.strip()
+    # replace any characters not alphanumeric, dash, underscore with underscore
+    return re.sub(r"[^0-9A-Za-z\-_]+", "_", s)
+
+# save uploaded file bytes to media/<user>/<project>/<uuid>.<ext>
+def save_photo_file(uploaded_file, username: str, project_name: str) -> str:
+    if not uploaded_file:
+        return None
+    # ensure media dir exists
+    user_safe = _sanitize_for_path(username)
+    project_safe = _sanitize_for_path(project_name)
+    user_dir = os.path.join(MEDIA_DIR, user_safe, project_safe)
+    os.makedirs(user_dir, exist_ok=True)
+    # determine extension from uploaded_file.name
+    orig_name = getattr(uploaded_file, "name", None) or ""
+    _, ext = os.path.splitext(orig_name)
+    ext = ext.lower() if ext else ""
+    # fallback extensions based on mimetype if ext missing
+    if not ext:
+        typ = getattr(uploaded_file, "type", "") or ""
+        if "jpeg" in typ or "jpg" in typ:
+            ext = ".jpg"
+        elif "png" in typ:
+            ext = ".png"
+        else:
+            ext = ".jpg"
+    # filename is uuid4 + ext
+    filename = f"{uuid.uuid4().hex}{ext}"
+    path = os.path.join(user_dir, filename)
+    try:
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        data = uploaded_file.read()
+        # write bytes
+        with open(path, "wb") as f:
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        return path.replace("\\", "/")
+    except Exception:
+        return None
+
+def remove_media_file(path: str):
+    try:
+        if not path:
+            return
+        # only remove files under MEDIA_DIR to be safe
+        if isinstance(path, str) and os.path.exists(path) and os.path.commonpath([os.path.abspath(path), os.path.abspath(MEDIA_DIR)]) == os.path.abspath(MEDIA_DIR):
+            os.remove(path)
+            # try removing empty parent dirs up to MEDIA_DIR
+            parent = os.path.dirname(path)
+            while parent and os.path.abspath(parent) != os.path.abspath(MEDIA_DIR):
+                try:
+                    if not os.listdir(parent):
+                        os.rmdir(parent)
+                        parent = os.path.dirname(parent)
+                    else:
+                        break
+                except Exception:
+                    break
+    except Exception:
+        pass
+
+def get_photo_bytes(photo_field):
+    """
+    Accepts either:
+    - a media file path (string) -> return file bytes
+    - a base64 string -> return decoded bytes
+    - None -> return None
+    """
+    if not photo_field:
+        return None
+    # if path exists on disk, read it
+    if isinstance(photo_field, str) and os.path.exists(photo_field):
+        try:
+            with open(photo_field, "rb") as f:
+                return f.read()
+        except Exception:
+            return None
+    # if string looks like base64, attempt decode
+    if isinstance(photo_field, str):
+        try:
+            return base64.b64decode(photo_field)
+        except Exception:
+            return None
+    return None
+
+# maintain backward compatibility: not used for new uploads
+def photo_to_b64(file):
+    if not file:
+        return None
+    try:
+        try:
+            file.seek(0)
+        except Exception:
+            pass
+        data = file.read()
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        return base64.b64encode(data).decode("utf-8")
+    except Exception:
+        return None
+
+def b64_to_photo(b64_string):
+    if not b64_string:
+        return None
+    try:
+        return base64.b64decode(b64_string)
+    except Exception:
+        return None
 
 # ========================
 # Session State Init
@@ -223,7 +317,7 @@ if "editing_project" not in st.session_state:
 if "editing_participant" not in st.session_state:
     st.session_state["editing_participant"] = None
 
-# initial load (reads are fine without lock)
+# initial load
 users = load_users()
 
 # ========================
@@ -258,12 +352,11 @@ if not st.session_state["logged_in"]:
                 st.success("Logged in as Admin ✅")
                 safe_rerun()
 
-            users = load_users()  # reload
+            users = load_users()
             if username in users and users[username]["password"] == hash_password(password):
                 st.session_state["logged_in"] = True
                 st.session_state["current_user"] = username
                 users[username]["last_login"] = datetime.now().isoformat()
-                # ensure at least one project exists for this user
                 if "projects" not in users[username] or not isinstance(users[username]["projects"], dict):
                     users[username]["projects"] = {DEFAULT_PROJECT_NAME: _default_project_block()}
                 try:
@@ -307,11 +400,9 @@ if not st.session_state["logged_in"]:
 # Main App (after login)
 # ========================
 else:
-    # always load fresh data for safety
     users = load_users()
     current_user = st.session_state["current_user"]
 
-    # guard: if current_user missing from users, log out
     if current_user not in users:
         st.error("User not found. Please log in again.")
         st.session_state["logged_in"] = False
@@ -319,7 +410,6 @@ else:
         safe_rerun()
 
     user_data = users[current_user]
-    # ensure projects key exists and is a dict
     projects = user_data.get("projects", {})
     if not isinstance(projects, dict) or not projects:
         projects = {DEFAULT_PROJECT_NAME: _default_project_block()}
@@ -359,7 +449,6 @@ else:
     # Active Project Display in Sidebar
     st.sidebar.markdown("---")
     st.sidebar.subheader("Active Project")
-    # default to existing current_project if it's in this user's projects, otherwise set to first project
     if st.session_state.get("current_project") not in projects:
         st.session_state["current_project"] = next(iter(projects.keys()))
     active = st.session_state.get("current_project", DEFAULT_PROJECT_NAME)
@@ -385,7 +474,6 @@ else:
             submitted = st.form_submit_button("Submit")
 
             if submitted:
-                # reload users and user_data fresh before write
                 users = load_users()
                 if current_user not in users:
                     st.error("User not found. Please log in again.")
@@ -394,6 +482,9 @@ else:
                 projects = user_data.get("projects", {})
                 proj_block = projects.get(active, _default_project_block())
                 participants = proj_block.get("participants", [])
+
+                # save photo to disk and store path
+                photo_path = save_photo_file(photo, current_user, active) if photo else None
 
                 entry = {
                     "number": number,
@@ -405,7 +496,7 @@ else:
                     "waist": waist,
                     "dress_suit": dress_suit,
                     "availability": availability,
-                    "photo": photo_to_b64(photo) if photo else None
+                    "photo": photo_path
                 }
                 participants.append(entry)
                 proj_block["participants"] = participants
@@ -481,7 +572,6 @@ else:
             created = block.get("created_at", datetime.now().isoformat())
             return name, block.get("description", ""), created, count
 
-        # Always work off up-to-date projects
         users = load_users()
         user_data = users.get(current_user, user_data)
         projects = user_data.get("projects", {})
@@ -553,6 +643,28 @@ else:
                         else:
                             block = projects.pop(name)
                             block["description"] = new_desc
+                            # move media files from old project folder to new project folder if any
+                            old_dir = os.path.join(MEDIA_DIR, _sanitize_for_path(current_user), _sanitize_for_path(name))
+                            new_dir = os.path.join(MEDIA_DIR, _sanitize_for_path(current_user), _sanitize_for_path(new_name))
+                            try:
+                                if os.path.exists(old_dir):
+                                    os.makedirs(new_dir, exist_ok=True)
+                                    for f in os.listdir(old_dir):
+                                        oldpath = os.path.join(old_dir, f)
+                                        newpath = os.path.join(new_dir, f)
+                                        try:
+                                            shutil.move(oldpath, newpath)
+                                        except Exception:
+                                            pass
+                                    # remove old dir if empty
+                                    try:
+                                        if not os.listdir(old_dir):
+                                            os.rmdir(old_dir)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
                             projects[new_name] = block
                             if st.session_state["current_project"] == name:
                                 st.session_state["current_project"] = new_name
@@ -590,6 +702,14 @@ else:
                         if len(projects) <= 1:
                             st.error("You must keep at least one project.")
                         else:
+                            # remove media folder for this project
+                            proj_media_dir = os.path.join(MEDIA_DIR, _sanitize_for_path(current_user), _sanitize_for_path(name))
+                            try:
+                                if os.path.exists(proj_media_dir):
+                                    shutil.rmtree(proj_media_dir)
+                            except Exception:
+                                pass
+
                             projects.pop(name, None)
                             if st.session_state["current_project"] == name:
                                 st.session_state["current_project"] = next(iter(projects.keys()))
@@ -641,6 +761,7 @@ else:
                 submitted = st.form_submit_button("Add Participant")
 
                 if submitted:
+                    photo_path = save_photo_file(photo, current_user, current) if photo else None
                     entry = {
                         "number": number,
                         "name": name,
@@ -651,7 +772,7 @@ else:
                         "waist": waist,
                         "dress_suit": dress_suit,
                         "availability": availability,
-                        "photo": photo_to_b64(photo) if photo else None
+                        "photo": photo_path
                     }
                     project_data.append(entry)
                     projects[current]["participants"] = project_data
@@ -672,9 +793,17 @@ else:
             for idx, p in enumerate(project_data):
                 with st.container():
                     cols = st.columns([1, 2, 1, 2])
-                    if p.get("photo"):
+                    # load photo bytes from either media file or base64
+                    bytes_data = get_photo_bytes(p.get("photo"))
+                    if bytes_data:
                         try:
-                            img = Image.open(io.BytesIO(b64_to_photo(p["photo"])))
+                            buf = io.BytesIO(bytes_data)
+                            buf.seek(0)
+                            img = Image.open(buf)
+                            try:
+                                img = img.convert("RGB")
+                            except Exception:
+                                pass
                             cols[0].image(img, width=100)
                         except Exception:
                             cols[0].write("Invalid Photo")
@@ -707,6 +836,15 @@ else:
                             save_edit = st.form_submit_button("Save Changes")
                             cancel_edit = st.form_submit_button("Cancel")
                             if save_edit:
+                                # if new photo uploaded, save it and remove old media file (if any)
+                                new_photo_path = p.get("photo")
+                                if ephoto:
+                                    new_photo_path = save_photo_file(ephoto, current_user, current)
+                                    # remove old media file if it exists and is under MEDIA_DIR
+                                    old_photo = p.get("photo")
+                                    if isinstance(old_photo, str) and os.path.exists(old_photo):
+                                        remove_media_file(old_photo)
+
                                 p.update({
                                     "number": enumber,
                                     "name": ename,
@@ -717,7 +855,7 @@ else:
                                     "waist": ewaist,
                                     "dress_suit": edress_suit,
                                     "availability": eavailability,
-                                    "photo": photo_to_b64(ephoto) if ephoto else p.get("photo")
+                                    "photo": new_photo_path
                                 })
                                 projects[current]["participants"] = project_data
                                 user_data["projects"] = projects
@@ -735,6 +873,10 @@ else:
 
                     # Delete participant
                     if d_btn.button("Delete", key=f"del_{idx}"):
+                        # remove media file if it exists
+                        pf = p.get("photo")
+                        if isinstance(pf, str) and os.path.exists(pf):
+                            remove_media_file(pf)
                         project_data.pop(idx)
                         projects[current]["participants"] = project_data
                         user_data["projects"] = projects
@@ -763,9 +905,11 @@ else:
                     table.columns[1].width = Inches(4.5)
                     row_cells = table.rows[0].cells
 
-                    if p.get("photo"):
+                    bytes_data = get_photo_bytes(p.get("photo"))
+                    if bytes_data:
                         try:
-                            image_stream = io.BytesIO(b64_to_photo(p["photo"]))
+                            image_stream = io.BytesIO(bytes_data)
+                            image_stream.seek(0)
                             paragraph = row_cells[0].paragraphs[0]
                             run = paragraph.add_run()
                             run.add_picture(image_stream, width=Inches(1.5))
@@ -876,6 +1020,14 @@ else:
                     if uname == "admin":
                         st.error("Cannot delete the built-in admin.")
                     else:
+                        # remove user's media directory
+                        user_media_dir = os.path.join(MEDIA_DIR, _sanitize_for_path(uname))
+                        try:
+                            if os.path.exists(user_media_dir):
+                                shutil.rmtree(user_media_dir)
+                        except Exception:
+                            pass
+
                         admin_users.pop(uname, None)
                         try:
                             save_users(admin_users)

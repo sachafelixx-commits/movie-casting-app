@@ -676,8 +676,9 @@ else:
                                     create_project(conn, user_id, p_name, p_desc or "")
                                     log_action(current_username, "create_project", p_name)
                                     st.success(f"Project '{p_name}' created.")
+                                    # set active project so later UI shows it
                                     st.session_state["current_project_name"] = p_name
-                                    safe_rerun()
+                                    # NOTE: no immediate safe_rerun() here — allow the rest of the run to fetch projects and display the success message
                         except Exception as e:
                             st.error(f"Unable to create project: {e}")
 
@@ -1043,7 +1044,7 @@ else:
 
                 if a2.button("Delete", key=f"deluser_{uname}"):
                     if uname == "admin":
-                        st.error("Cannot delete built-in admin.")
+                        st.error("Cannot delete the built-in admin.")
                     else:
                         try:
                             user_media = os.path.join(MEDIA_DIR, _sanitize_for_path(uname))

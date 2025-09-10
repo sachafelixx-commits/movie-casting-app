@@ -19,21 +19,7 @@ from contextlib import contextmanager
 # ========================
 # Config
 # ========================
-st.set_page_config(page_title="Sacha's Casting Manager (SQLite)", layout="wide")
 
-DB_FILE = "data.db"
-USERS_JSON = "users.json"   # used only for migration
-MEDIA_DIR = "media"
-MIGRATION_MARKER = os.path.join(MEDIA_DIR, ".db_migrated")
-DEFAULT_PROJECT_NAME = "Default Project"
-
-# SQLite pragmas
-PRAGMA_WAL = "WAL"
-PRAGMA_SYNCHRONOUS = "NORMAL"
-
-# ========================
-# Inject UI CSS for letter-box participant cards (no stray text)
-# ========================
 # ========================
 # Utilities
 # ========================
@@ -79,8 +65,68 @@ def safe_rerun():
     st.session_state["_needs_refresh"] = not st.session_state.get("_needs_refresh", False)
     return
 
+# ========================
+# DB connection caching (fast)
+# ========================
+@st.cache_resource
+def get_db_conn():
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA journal_mode = WAL;")
+        cur.execute(f"PRAGMA synchronous = {PRAGMA_SYNCHRONOUS};")
+        # optional: tune cache size if you have memory
+        # cur.execute("PRAGMA cache_size = -20000;")
+    except Exception:
+        pass
+    return conn
+
+# ========================
+# Image caching helpers
+# ========================
+@st.cache_data(show_spinner=False)
+def image_b64_for_path(path):
+    """Return data:<mime>;base64,... for a given file path (cached)."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            b = f.read()
+        b64 = base64.b64encode(b).decode("utf-8")
+        mime = "image/jpeg"
+        try:
+            img = Image.open(io.BytesIO(b))
+            fmt = (img.format or "").lower()
+            if fmt == "png":
+                mime = "image/png"
+            elif fmt in ("gif",):
+                mime = "image/gif"
+            elif fmt in ("webp",):
+                mime = "image/webp"
+        except Exception:
+            pass
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return None
+
+def thumb_path_for(photo_path):
+    """Return path to thumbnail if exists, otherwise original path if exists, else None."""
+    if not photo_path:
+        return None
+    base, ext = os.path.splitext(photo_path)
+    thumb = f"{base}_thumb.jpg"
+    if os.path.exists(thumb):
+        return thumb
+    if os.path.exists(photo_path):
+        return photo_path
+    return None
+
+# ========================
 # save uploaded file bytes to media/<username>/<project>/<uuid>.<ext>
-def save_photo_file(uploaded_file, username: str, project_name: str) -> str:
+# (now also creates a small thumbnail for display)
+# ========================
+def save_photo_file(uploaded_file, username: str, project_name: str, make_thumb=True, thumb_size=(400, 400)) -> str:
     if not uploaded_file:
         return None
     ensure_media_dir()
@@ -113,6 +159,19 @@ def save_photo_file(uploaded_file, username: str, project_name: str) -> str:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
+        # create thumbnail next to original (jpg)
+        if make_thumb:
+            try:
+                buf = io.BytesIO(data)
+                img = Image.open(buf)
+                img.thumbnail(thumb_size)
+                thumb_name = f"{os.path.splitext(filename)[0]}_thumb.jpg"
+                thumb_path = os.path.join(user_dir, thumb_name)
+                img.convert("RGB").save(thumb_path, format="JPEG", quality=75)
+            except Exception:
+                # ignore thumbnail errors
+                pass
+        # clear cached image for this path if needed by updating cache key indirectly (cache_data keyed by path)
         return path.replace("\\", "/")
     except Exception:
         return None
@@ -150,6 +209,16 @@ def save_photo_bytes(bytes_data: bytes, username: str, project_name: str, ext_hi
             f.write(bytes_data)
             f.flush()
             os.fsync(f.fileno())
+        # create thumbnail
+        try:
+            buf2 = io.BytesIO(bytes_data)
+            img = Image.open(buf2)
+            img.thumbnail((400,400))
+            thumb_name = f"{os.path.splitext(filename)[0]}_thumb.jpg"
+            thumb_path = os.path.join(user_dir, thumb_name)
+            img.convert("RGB").save(thumb_path, format="JPEG", quality=75)
+        except Exception:
+            pass
         return path.replace("\\", "/")
     except Exception:
         return None
@@ -160,6 +229,14 @@ def remove_media_file(path: str):
             return
         if isinstance(path, str) and os.path.exists(path) and os.path.commonpath([os.path.abspath(path), os.path.abspath(MEDIA_DIR)]) == os.path.abspath(MEDIA_DIR):
             os.remove(path)
+            # also try removing thumbnail if exists
+            base, _ = os.path.splitext(path)
+            thumb = f"{base}_thumb.jpg"
+            try:
+                if os.path.exists(thumb):
+                    os.remove(thumb)
+            except Exception:
+                pass
             # cleanup empty dirs up to MEDIA_DIR
             parent = os.path.dirname(path)
             while parent and os.path.abspath(parent) != os.path.abspath(MEDIA_DIR):
@@ -194,6 +271,7 @@ def get_photo_bytes(photo_field):
 # SQLite helpers
 # ========================
 def db_connect():
+    # keep for compatibility where a short-lived connection is fine
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -427,6 +505,22 @@ def list_projects_for_user(conn, user_id):
     c.execute("SELECT * FROM projects WHERE user_id=? ORDER BY name COLLATE NOCASE", (user_id,))
     return c.fetchall()
 
+def list_projects_with_counts(conn, user_id):
+    c = conn.cursor()
+    c.execute("""
+        SELECT p.id, p.name, p.description, p.created_at,
+               COALESCE(cnt.cnt, 0) AS participant_count
+        FROM projects p
+        LEFT JOIN (
+            SELECT project_id, COUNT(*) as cnt
+            FROM participants
+            GROUP BY project_id
+        ) cnt ON cnt.project_id = p.id
+        WHERE p.user_id = ?
+        ORDER BY p.name COLLATE NOCASE
+    """, (user_id,))
+    return c.fetchall()
+
 def create_project(conn, user_id, name, description=""):
     c = conn.cursor()
     now = datetime.now().isoformat()
@@ -595,17 +689,17 @@ else:
     except Exception:
         st.session_state["participant_mode"] = st.sidebar.checkbox("Enable Participant Mode (Kiosk)", value=st.session_state.get("participant_mode", False))
 
-    # load user's projects
-    with db_connect() as conn:
-        projects = list_projects_for_user(conn, user_id)
-    if not projects:
+    # load user's projects (use cached connection + batched counts)
+    conn_read = get_db_conn()
+    proj_rows = list_projects_with_counts(conn_read, user_id)
+    if not proj_rows:
         with db_transaction() as conn:
             create_project(conn, user_id, DEFAULT_PROJECT_NAME, "")
-        with db_connect() as conn:
-            projects = list_projects_for_user(conn, user_id)
+        conn_read = get_db_conn()
+        proj_rows = list_projects_with_counts(conn_read, user_id)
 
     current_project_name = st.session_state.get("current_project_name")
-    project_names = [p["name"] for p in projects]
+    project_names = [r["name"] for r in proj_rows]
     if current_project_name not in project_names:
         st.session_state["current_project_name"] = project_names[0] if project_names else DEFAULT_PROJECT_NAME
 
@@ -685,17 +779,12 @@ else:
                         except Exception as e:
                             st.error(f"Unable to create project: {e}")
 
-        # fetch fresh projects
-        with db_connect() as conn:
-            proj_rows = list_projects_for_user(conn, user_id)
+        # fetch fresh projects (batched counts)
+        conn_read = get_db_conn()
+        proj_rows = list_projects_with_counts(conn_read, user_id)
         proj_items = []
         for r in proj_rows:
-            project_id = r["id"]
-            with db_connect() as conn:
-                c = conn.cursor()
-                c.execute("SELECT COUNT(*) as cnt FROM participants WHERE project_id=?", (project_id,))
-                cnt = c.fetchone()["cnt"]
-            proj_items.append((r["name"], r["description"], r["created_at"], cnt))
+            proj_items.append((r["name"], r["description"], r["created_at"], r["participant_count"]))
 
         if query:
             q = query.lower().strip()
@@ -862,28 +951,11 @@ else:
                 pid = p["id"]
                 # container row: left = letterbox card (HTML), right = action buttons
                 left, right = st.columns([9,1])
-                # build photo HTML (base64) or placeholder
-                bytes_data = get_photo_bytes(p["photo_path"])
-                if bytes_data:
-                    try:
-                        img_b64 = base64.b64encode(bytes_data).decode("utf-8")
-                        # attempt to detect mime
-                        mime = "image/jpeg"
-                        try:
-                            buf = io.BytesIO(bytes_data)
-                            img = Image.open(buf)
-                            fmt = (img.format or "").lower()
-                            if fmt == "png":
-                                mime = "image/png"
-                            elif fmt in ("gif",):
-                                mime = "image/gif"
-                            elif fmt in ("webp",):
-                                mime = "image/webp"
-                        except Exception:
-                            pass
-                        img_tag = f"<img class='photo' src='data:{mime};base64,{img_b64}' alt='photo'/>"
-                    except Exception:
-                        img_tag = "<div class='photo' style='display:flex;align-items:center;justify-content:center;color:#777'>Invalid Photo</div>"
+                # choose thumbnail or original
+                display_path = thumb_path_for(p["photo_path"])
+                data_uri = image_b64_for_path(display_path) if display_path else None
+                if data_uri:
+                    img_tag = f"<img class='photo' src='{data_uri}' alt='photo'/>"
                 else:
                     img_tag = "<div class='photo' style='display:flex;align-items:center;justify-content:center;color:#777'>No Photo</div>"
 

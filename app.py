@@ -77,23 +77,7 @@ st.markdown("""
   gap:12px;
   align-items:flex-start;
   margin-bottom: 10px;
-}
 
-/* Responsive */
-@media (max-width: 900px) {
-  .participant-letterbox .photo { height: 160px; }
-}
-@media (max-width: 600px) {
-  .participant-letterbox { max-width: 100%; padding: 6px; }
-  .participant-letterbox .photo { height: 140px; }
-  .part-row { flex-direction: column; }
-}
-
-/* Buttons slightly larger for touch */
-.stButton>button, button {
-  padding: .55rem .9rem !important;
-  font-size: 0.98rem !important;
-}
 </style>
 """, unsafe_allow_html=True)
 

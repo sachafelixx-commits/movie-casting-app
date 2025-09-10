@@ -79,7 +79,7 @@ st.markdown("""
   align-items:flex-start;
   margin-bottom: 10px;
 
-</style
+
 """, unsafe_allow_html=True)
 
 # ========================

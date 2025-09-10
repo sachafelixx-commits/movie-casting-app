@@ -33,7 +33,7 @@ PRAGMA_WAL = "WAL"
 PRAGMA_SYNCHRONOUS = "NORMAL"
 
 # ========================
-# Inject UI CSS for letter-box participant cards (no stray text)
+# Inject UI CSS for letter-box participant cards
 # ========================
 st.markdown("""
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -78,24 +78,8 @@ st.markdown("""
   gap:12px;
   align-items:flex-start;
   margin-bottom: 10px;
-}
 
-/* Responsive */
-@media (max-width: 900px) {
-  .participant-letterbox .photo { height: 160px; }
-}
-@media (max-width: 600px) {
-  .participant-letterbox { max-width: 100%; padding: 6px; }
-  .participant-letterbox .photo { height: 140px; }
-  .part-row { flex-direction: column; }
-}
-
-/* Buttons slightly larger for touch */
-.stButton>button, button {
-  padding: .55rem .9rem !important;
-  font-size: 0.98rem !important;
-}
-</style>
+</style
 """, unsafe_allow_html=True)
 
 # ========================
@@ -123,6 +107,24 @@ def looks_like_base64_image(s: str) -> bool:
     if re.fullmatch(r"[A-Za-z0-9+/=\r\n]+", s):
         return True
     return False
+
+def safe_field(row_or_dict, key, default=""):
+    """
+    Safely get a field from sqlite3.Row or from a dict-like object.
+    Returns default for missing/None values.
+    """
+    if row_or_dict is None:
+        return default
+    try:
+        # sqlite3.Row supports mapping access by key (row["col"])
+        val = row_or_dict[key]
+    except Exception:
+        try:
+            # dict-like fallback
+            val = row_or_dict.get(key, default)
+        except Exception:
+            val = default
+    return val if val is not None else default
 
 # -------------------------
 # safe_rerun helper
@@ -1116,7 +1118,9 @@ else:
                     except Exception as e:
                         st.error(f"Unable to delete participant: {e}")
 
-        # Export to Word
+        # ------------------------
+        # Export to Word (fixed safe_field usage)
+        # ------------------------
         st.subheader("📄 Export Participants (Word)")
         if st.button("Download Word File of Current Project"):
             try:
@@ -1137,7 +1141,7 @@ else:
                             row_cells = table.rows[0].cells
 
                             # Prefer thumbnail if available
-                            display_path = thumb_path_for(p["photo_path"])
+                            display_path = thumb_path_for(safe_field(p, "photo_path", ""))
                             bytes_data = None
                             # 1) try file bytes (thumb or original)
                             if display_path and os.path.exists(display_path):
@@ -1148,7 +1152,7 @@ else:
                                     bytes_data = None
                             # 2) fallback: try stored path/raw base64
                             if bytes_data is None:
-                                bytes_data = get_photo_bytes(p["photo_path"])
+                                bytes_data = get_photo_bytes(safe_field(p, "photo_path", ""))
 
                             if bytes_data:
                                 try:
@@ -1177,16 +1181,17 @@ else:
                             else:
                                 row_cells[0].text = "No Photo"
 
+                            # Use safe_field to read fields from sqlite3.Row or dict
                             info_text = (
-                                f"Number: {p.get('number','')}\n"
-                                f"Name: {p.get('name','')}\n"
-                                f"Role: {p.get('role','')}\n"
-                                f"Age: {p.get('age','')}\n"
-                                f"Agency: {p.get('agency','')}\n"
-                                f"Height: {p.get('height','')}\n"
-                                f"Waist: {p.get('waist','')}\n"
-                                f"Dress/Suit: {p.get('dress_suit','')}\n"
-                                f"Next Available: {p.get('availability','')}"
+                                f"Number: {safe_field(p, 'number','')}\n"
+                                f"Name: {safe_field(p, 'name','')}\n"
+                                f"Role: {safe_field(p, 'role','')}\n"
+                                f"Age: {safe_field(p, 'age','')}\n"
+                                f"Agency: {safe_field(p, 'agency','')}\n"
+                                f"Height: {safe_field(p, 'height','')}\n"
+                                f"Waist: {safe_field(p, 'waist','')}\n"
+                                f"Dress/Suit: {safe_field(p, 'dress_suit','')}\n"
+                                f"Next Available: {safe_field(p, 'availability','')}"
                             )
                             row_cells[1].text = info_text
                             doc.add_paragraph("\n")

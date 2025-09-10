@@ -9,6 +9,7 @@ import time
 import uuid
 import shutil
 import re
+import tempfile
 from datetime import datetime
 from docx import Document
 from docx.shared import Inches
@@ -313,14 +314,22 @@ def remove_media_file(path: str):
         pass
 
 def get_photo_bytes(photo_field):
+    """
+    Accepts:
+      - local file path -> returns file bytes
+      - base64 string -> decodes and returns bytes
+      - None/other -> returns None
+    """
     if not photo_field:
         return None
+    # if path exists, return bytes
     if isinstance(photo_field, str) and os.path.exists(photo_field):
         try:
             with open(photo_field, "rb") as f:
                 return f.read()
         except Exception:
             return None
+    # if looks like base64 string
     if isinstance(photo_field, str):
         try:
             return base64.b64decode(photo_field)
@@ -1111,14 +1120,42 @@ else:
                             table.columns[1].width = Inches(4.5)
                             row_cells = table.rows[0].cells
 
-                            bytes_data = get_photo_bytes(p["photo_path"])
+                            # Prefer thumbnail if available
+                            display_path = thumb_path_for(p["photo_path"])
+                            bytes_data = None
+                            # 1) try file bytes (thumb or original)
+                            if display_path and os.path.exists(display_path):
+                                try:
+                                    with open(display_path, "rb") as f:
+                                        bytes_data = f.read()
+                                except Exception:
+                                    bytes_data = None
+                            # 2) fallback: try stored path/raw base64
+                            if bytes_data is None:
+                                bytes_data = get_photo_bytes(p["photo_path"])
+
                             if bytes_data:
                                 try:
                                     image_stream = io.BytesIO(bytes_data)
                                     image_stream.seek(0)
                                     paragraph = row_cells[0].paragraphs[0]
                                     run = paragraph.add_run()
-                                    run.add_picture(image_stream, width=Inches(1.5))
+                                    try:
+                                        # Try adding picture directly from BytesIO
+                                        run.add_picture(image_stream, width=Inches(1.5))
+                                    except Exception:
+                                        # Fallback: write to a temp file and pass the filename
+                                        tf = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+                                        try:
+                                            tf.write(bytes_data)
+                                            tf.flush()
+                                            tf.close()
+                                            run.add_picture(tf.name, width=Inches(1.5))
+                                        finally:
+                                            try:
+                                                os.unlink(tf.name)
+                                            except Exception:
+                                                pass
                                 except Exception:
                                     row_cells[0].text = "Photo Error"
                             else:
@@ -1138,6 +1175,7 @@ else:
                             row_cells[1].text = info_text
                             doc.add_paragraph("\n")
 
+                        # Save to BytesIO and provide download button
                         word_stream = io.BytesIO()
                         doc.save(word_stream)
                         word_stream.seek(0)

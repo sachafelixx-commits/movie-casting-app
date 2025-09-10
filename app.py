@@ -32,6 +32,72 @@ PRAGMA_WAL = "WAL"
 PRAGMA_SYNCHRONOUS = "NORMAL"
 
 # ========================
+# Inject UI CSS for letter-box participant cards (no stray text)
+# ========================
+st.markdown("""
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+/* Participant letter-box card */
+.participant-letterbox {
+  max-width: 520px;
+  border-radius: 10px;
+  border: 1px solid rgba(0,0,0,0.06);
+  padding: 8px;
+  margin-bottom: 12px;
+  background: #fff;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.04);
+}
+.participant-letterbox .photo {
+  width: 100%;
+  height: 220px;
+  display:block;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #f6f6f6;
+  margin-bottom: 8px;
+}
+.participant-letterbox .name {
+  font-weight: 700;
+  font-size: 1.05rem;
+  margin-bottom: 6px;
+}
+.participant-letterbox .meta {
+  color: rgba(0,0,0,0.6);
+  font-size: 0.95rem;
+  margin-bottom: 4px;
+}
+.participant-letterbox .small {
+  color: rgba(0,0,0,0.55);
+  font-size: 0.9rem;
+}
+
+/* Grid layout for larger screens: left column card, right small action column */
+.part-row {
+  display:flex;
+  gap:12px;
+  align-items:flex-start;
+  margin-bottom: 10px;
+}
+
+/* Responsive */
+@media (max-width: 900px) {
+  .participant-letterbox .photo { height: 160px; }
+}
+@media (max-width: 600px) {
+  .participant-letterbox { max-width: 100%; padding: 6px; }
+  .participant-letterbox .photo { height: 140px; }
+  .part-row { flex-direction: column; }
+}
+
+/* Buttons slightly larger for touch */
+.stButton>button, button {
+  padding: .55rem .9rem !important;
+  font-size: 0.98rem !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ========================
 # Utilities
 # ========================
 def _sanitize_for_path(s: str) -> str:
@@ -846,7 +912,7 @@ else:
                     except Exception as e:
                         st.error(f"Unable to add participant: {e}")
 
-        # list participants
+        # list participants (letter-box style with photo on top, details below)
         with db_connect() as conn:
             cur = conn.cursor()
             cur.execute("SELECT * FROM participants WHERE project_id=? ORDER BY id", (project_id,))
@@ -857,34 +923,58 @@ else:
         else:
             for p in participants:
                 pid = p["id"]
-                cols = st.columns([1,2,1,2])
+                # container row: left = letterbox card (HTML), right = action buttons
+                left, right = st.columns([9,1])
+                # build photo HTML (base64) or placeholder
                 bytes_data = get_photo_bytes(p["photo_path"])
                 if bytes_data:
                     try:
-                        buf = io.BytesIO(bytes_data)
-                        buf.seek(0)
-                        img = Image.open(buf)
+                        img_b64 = base64.b64encode(bytes_data).decode("utf-8")
+                        # attempt to detect mime
+                        mime = "image/jpeg"
                         try:
-                            img = img.convert("RGB")
+                            buf = io.BytesIO(bytes_data)
+                            img = Image.open(buf)
+                            fmt = (img.format or "").lower()
+                            if fmt == "png":
+                                mime = "image/png"
+                            elif fmt in ("gif",):
+                                mime = "image/gif"
+                            elif fmt in ("webp",):
+                                mime = "image/webp"
                         except Exception:
                             pass
-                        cols[0].image(img, width=100)
+                        img_tag = f"<img class='photo' src='data:{mime};base64,{img_b64}' alt='photo'/>"
                     except Exception:
-                        cols[0].write("Invalid Photo")
+                        img_tag = "<div class='photo' style='display:flex;align-items:center;justify-content:center;color:#777'>Invalid Photo</div>"
                 else:
-                    cols[0].write("No Photo")
+                    img_tag = "<div class='photo' style='display:flex;align-items:center;justify-content:center;color:#777'>No Photo</div>"
 
-                cols[1].markdown(
-                    f"**{p['name'] or 'Unnamed'}** (#{p['number'] or ''})  \n"
-                    f"Role: {p['role'] or ''} | Age: {p['age'] or ''}  \n"
-                    f"Agency: {p['agency'] or ''}  \n"
-                    f"Height: {p['height'] or ''} | Waist: {p['waist'] or ''} | Dress/Suit: {p['dress_suit'] or ''}  \n"
-                    f"Availability: {p['availability'] or ''}"
-                )
+                # Details HTML
+                name_html = (p["name"] or "Unnamed")
+                number_html = (p["number"] or "")
+                role_html = p["role"] or ""
+                age_html = p["age"] or ""
+                agency_html = p["agency"] or ""
+                height_html = p["height"] or ""
+                waist_html = p["waist"] or ""
+                dress_html = p["dress_suit"] or ""
+                avail_html = p["availability"] or ""
 
-                e_btn, d_btn = cols[2], cols[3]
+                card_html = f"""
+                    <div class="participant-letterbox">
+                        {img_tag}
+                        <div class="name">{name_html} <span class="small">#{number_html}</span></div>
+                        <div class="meta">Role: {role_html} • Age: {age_html}</div>
+                        <div class="meta">Agency: {agency_html}</div>
+                        <div class="meta">Height: {height_html} • Waist: {waist_html} • Dress/Suit: {dress_html}</div>
+                        <div class="small">Availability: {avail_html}</div>
+                    </div>
+                """
+                left.markdown(card_html, unsafe_allow_html=True)
 
-                if e_btn.button("Edit", key=f"edit_{pid}"):
+                # Right column: Edit/Delete buttons (keep previous functionality)
+                if right.button("Edit", key=f"edit_{pid}"):
                     with st.form(f"edit_participant_{pid}"):
                         enumber = st.text_input("Number", value=p["number"] or "")
                         ename = st.text_input("Name", value=p["name"] or "")
@@ -919,7 +1009,7 @@ else:
                         if cancel_edit:
                             safe_rerun()
 
-                if d_btn.button("Delete", key=f"del_{pid}"):
+                if right.button("Delete", key=f"del_{pid}"):
                     try:
                         with db_transaction() as conn:
                             if isinstance(p["photo_path"], str) and os.path.exists(p["photo_path"]):
@@ -990,7 +1080,7 @@ else:
             except Exception as e:
                 st.error(f"Unable to generate Word file: {e}")
 
-        # Admin dashboard
+        # Admin dashboard (unchanged)
         if role == "Admin":
             st.header("👑 Admin Dashboard")
             if st.button("🔄 Refresh Users"):

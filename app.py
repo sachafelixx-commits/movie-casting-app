@@ -69,7 +69,7 @@ st.markdown("""
 .participant-letterbox .small {
   color: rgba(0,0,0,0.55);
   font-size: 0.9rem;
-}
+
 
 /* Grid layout for larger screens: left column card, right small action column */
 .part-row {

@@ -34,59 +34,6 @@ PRAGMA_SYNCHRONOUS = "NORMAL"
 # ========================
 # Inject UI CSS for letter-box participant cards (no stray text)
 # ========================
-st.markdown("""
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-/* Participant letter-box card */
-.participant-letterbox {
-  max-width: 520px;
-  border-radius: 10px;
-  border: 1px solid rgba(0,0,0,0.06);
-  padding: 8px;
-  margin-bottom: 12px;
-  background: #fff;
-  box-shadow: 0 1px 6px rgba(0,0,0,0.04);
-}
-.participant-letterbox .photo {
-  width: 100%;
-  height: 220px;
-  display:block;
-  object-fit: cover;
-  border-radius: 8px;
-  background: #f6f6f6;
-  margin-bottom: 8px;
-}
-.participant-letterbox .name {
-  font-weight: 700;
-  font-size: 1.05rem;
-  margin-bottom: 6px;
-}
-.participant-letterbox .meta {
-  color: rgba(0,0,0,0.6);
-  font-size: 0.95rem;
-  margin-bottom: 4px;
-}
-.participant-letterbox .small {
-  color: rgba(0,0,0,0.55);
-  font-size: 0.9rem;
-
-
-/* Grid layout for larger screens: left column card, right small action column */
-.part-row {
-  display:flex;
-  gap:12px;
-  align-items:flex-start;
-  margin-bottom: 10px;
-}
-@media (max-width: 600px) {
-  .participant-letterbox { max-width: 100%; padding: 6px; }
-  .participant-letterbox .photo { height: 140px; }
-  .part-row { flex-direction: column; }
-
-}
-</style>
-""", unsafe_allow_html=True)
-
 # ========================
 # Utilities
 # ========================

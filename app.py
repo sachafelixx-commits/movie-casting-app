@@ -523,7 +523,7 @@ def migrate_from_json_if_needed():
             if user_id:
                 projects = info.get("projects", {}) or {}
                 if not isinstance(projects, dict) or not projects:
-                    projects = {DEFAULT_PROJECT_NAME: {"description":"", "created_at": datetime.now().isoformat(), "participants":[]}}
+                    projects = {DEFAULT_PROJECT_NAME: {"description":"", "created_at": datetime.now().isoformat(), "participants":[]} }
                 for pname, pblock in projects.items():
                     if not isinstance(pblock, dict):
                         continue
@@ -685,6 +685,9 @@ if "_needs_refresh" not in st.session_state:
     st.session_state["_needs_refresh"] = False
 if "prefill_username" not in st.session_state:
     st.session_state["prefill_username"] = ""
+# NEW: track which participant is being edited (pid) or None
+if "editing_participant" not in st.session_state:
+    st.session_state["editing_participant"] = None
 
 if not st.session_state["logged_in"]:
     st.title("🎬 Sacha's Casting Manager")
@@ -1086,19 +1089,25 @@ else:
                 """
                 left.markdown(card_html, unsafe_allow_html=True)
 
-                # Right column: Edit/Delete buttons (keep previous functionality)
-                if right.button("Edit", key=f"edit_{pid}"):
-                    with st.form(f"edit_participant_{pid}"):
-                        enumber = st.text_input("Number", value=p["number"] or "")
-                        ename = st.text_input("Name", value=p["name"] or "")
-                        erole = st.text_input("Role", value=p["role"] or "")
-                        eage = st.text_input("Age", value=p["age"] or "")
-                        eagency = st.text_input("Agency", value=p["agency"] or "")
-                        eheight = st.text_input("Height", value=p["height"] or "")
-                        ewaist = st.text_input("Waist", value=p["waist"] or "")
-                        edress = st.text_input("Dress/Suit", value=p["dress_suit"] or "")
-                        eavail = st.text_input("Next Availability", value=p["availability"] or "")
-                        ephoto = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"])
+                # Right column: Edit/Delete buttons
+                # Edit: set editing_participant and re-run to show form below
+                if right.button("Edit", key=f"editbtn_{pid}"):
+                    st.session_state["editing_participant"] = pid
+                    safe_rerun()
+
+                # If this participant is in editing mode, render the form (with unique widget keys)
+                if st.session_state.get("editing_participant") == pid:
+                    with st.form(f"edit_participant_form_{pid}"):
+                        enumber = st.text_input("Number", value=p["number"] or "", key=f"enumber_{pid}")
+                        ename = st.text_input("Name", value=p["name"] or "", key=f"ename_{pid}")
+                        erole = st.text_input("Role", value=p["role"] or "", key=f"erole_{pid}")
+                        eage = st.text_input("Age", value=p["age"] or "", key=f"eage_{pid}")
+                        eagency = st.text_input("Agency", value=p["agency"] or "", key=f"eagency_{pid}")
+                        eheight = st.text_input("Height", value=p["height"] or "", key=f"eheight_{pid}")
+                        ewaist = st.text_input("Waist", value=p["waist"] or "", key=f"ewaist_{pid}")
+                        edress = st.text_input("Dress/Suit", value=p["dress_suit"] or "", key=f"edress_{pid}")
+                        eavail = st.text_input("Next Availability", value=p["availability"] or "", key=f'eavail_{pid}')
+                        ephoto = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"], key=f"ephoto_{pid}")
                         save_edit = st.form_submit_button("Save Changes")
                         cancel_edit = st.form_submit_button("Cancel")
                         if save_edit:
@@ -1116,10 +1125,12 @@ else:
                                     """, (enumber, ename, erole, eage, eagency, eheight, ewaist, edress, eavail, new_photo_path, pid))
                                     log_action(current_username, "edit_participant", ename)
                                 st.success("Participant updated!")
+                                st.session_state["editing_participant"] = None
                                 safe_rerun()
                             except Exception as e:
                                 st.error(f"Unable to save participant edits: {e}")
                         if cancel_edit:
+                            st.session_state["editing_participant"] = None
                             safe_rerun()
 
                 if right.button("Delete", key=f"del_{pid}"):
@@ -1129,6 +1140,9 @@ else:
                                 remove_media_file(p["photo_path"])
                             conn.execute("DELETE FROM participants WHERE id=?", (pid,))
                             log_action(current_username, "delete_participant", p["name"] or "")
+                            # if we were editing this participant, clear the editing state
+                            if st.session_state.get("editing_participant") == pid:
+                                st.session_state["editing_participant"] = None
                         st.warning("Participant deleted")
                         safe_rerun()
                     except Exception as e:

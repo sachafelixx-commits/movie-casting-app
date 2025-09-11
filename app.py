@@ -172,6 +172,8 @@ def get_db_conn():
         cur = conn.cursor()
         cur.execute("PRAGMA journal_mode = WAL;")
         cur.execute(f"PRAGMA synchronous = {PRAGMA_SYNCHRONOUS};")
+        # optional: tune cache size if you have memory
+        # cur.execute("PRAGMA cache_size = -20000;")
     except Exception:
         pass
     return conn
@@ -1539,6 +1541,8 @@ else:
         # Admin dashboard (unchanged)
         if role == "Admin":
             st.header("👑 Admin Dashboard")
+            if st.button("🔄 Refresh Users"):
+                safe_rerun()
 
             # -- Migration / Backup tools for admins --
             with st.expander("🔧 Database Migration & Backup (Admin)", expanded=False):
@@ -1595,8 +1599,6 @@ else:
                         st.error(f"Migration failed: {e}")
 
             # -- End migration tools --
-            if st.button("🔄 Refresh Users"):
-                safe_rerun()
 
             with db_connect() as conn:
                 cur = conn.cursor()
@@ -1675,4 +1677,3 @@ else:
                             safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to delete user: {e}")
-

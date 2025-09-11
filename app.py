@@ -1,4 +1,12 @@
-# sachas_casting_manager_sqlite_sessions_fixed_schema.py
+# sachas_casting_manager_sqlite_sessions_full_backups_restore.py
+"""
+Sacha's Casting Manager
+- SQLite backend with sessions support
+- Letter-box participant cards
+- Thumbnail generation & caching
+- Admin tools: DB backup, combined DB+media zip, download backups, restore DB/media (safe)
+- Robust schema ensure + migration from users.json
+"""
 import streamlit as st
 import sqlite3
 import json
@@ -10,6 +18,7 @@ import uuid
 import shutil
 import re
 import tempfile
+import zipfile
 from datetime import datetime
 from docx import Document
 from docx.shared import Inches
@@ -20,17 +29,21 @@ from contextlib import contextmanager
 # ========================
 # Config
 # ========================
-st.set_page_config(page_title="Sacha's Casting Manager (SQLite + Sessions)", layout="wide")
+st.set_page_config(page_title="Sacha's Casting Manager (SQLite + Sessions + Backup)", layout="wide")
 
 DB_FILE = "data.db"
 USERS_JSON = "users.json"   # used only for migration
 MEDIA_DIR = "media"
 MIGRATION_MARKER = os.path.join(MEDIA_DIR, ".db_migrated")
+BACKUPS_DIR = "backups"
 DEFAULT_PROJECT_NAME = "Default Project"
 
 # SQLite pragmas
 PRAGMA_WAL = "WAL"
 PRAGMA_SYNCHRONOUS = "NORMAL"
+
+# ensure backups dir exists
+os.makedirs(BACKUPS_DIR, exist_ok=True)
 
 # ========================
 # Inject UI CSS for letter-box participant cards
@@ -132,11 +145,10 @@ def safe_field(row_or_dict, key, default=""):
     if row_or_dict is None:
         return default
     try:
-        # sqlite3.Row supports mapping access by key (row["col"]) 
+        # sqlite3.Row mapping-style access
         val = row_or_dict[key]
     except Exception:
         try:
-            # dict-like fallback
             val = row_or_dict.get(key, default)
         except Exception:
             val = default
@@ -157,7 +169,6 @@ def safe_rerun():
         return
     except Exception:
         pass
-    # As a last resort, toggle a session flag so Streamlit sees state change and re-executes
     st.session_state["_needs_refresh"] = not st.session_state.get("_needs_refresh", False)
     return
 
@@ -172,8 +183,6 @@ def get_db_conn():
         cur = conn.cursor()
         cur.execute("PRAGMA journal_mode = WAL;")
         cur.execute(f"PRAGMA synchronous = {PRAGMA_SYNCHRONOUS};")
-        # optional: tune cache size if you have memory
-        # cur.execute("PRAGMA cache_size = -20000;")
     except Exception:
         pass
     return conn
@@ -220,7 +229,7 @@ def thumb_path_for(photo_path):
 
 # ========================
 # save uploaded file bytes to media/<username>/<project>/<uuid>.<ext>
-# (now also creates a small thumbnail for display)
+# (creates a small thumbnail for display)
 # ========================
 def save_photo_file(uploaded_file, username: str, project_name: str, make_thumb=True, thumb_size=(400, 400)) -> str:
     if not uploaded_file:
@@ -265,7 +274,6 @@ def save_photo_file(uploaded_file, username: str, project_name: str, make_thumb=
                 thumb_path = os.path.join(user_dir, thumb_name)
                 img.convert("RGB").save(thumb_path, format="JPEG", quality=75)
             except Exception:
-                # ignore thumbnail errors
                 pass
         return path.replace("\\", "/")
     except Exception:
@@ -324,7 +332,6 @@ def remove_media_file(path: str):
             return
         if isinstance(path, str) and os.path.exists(path) and os.path.commonpath([os.path.abspath(path), os.path.abspath(MEDIA_DIR)]) == os.path.abspath(MEDIA_DIR):
             os.remove(path)
-            # also try removing thumbnail if exists
             base, _ = os.path.splitext(path)
             thumb = f"{base}_thumb.jpg"
             try:
@@ -332,7 +339,6 @@ def remove_media_file(path: str):
                     os.remove(thumb)
             except Exception:
                 pass
-            # cleanup empty dirs up to MEDIA_DIR
             parent = os.path.dirname(path)
             while parent and os.path.abspath(parent) != os.path.abspath(MEDIA_DIR):
                 try:
@@ -355,14 +361,12 @@ def get_photo_bytes(photo_field):
     """
     if not photo_field:
         return None
-    # if path exists, return bytes
     if isinstance(photo_field, str) and os.path.exists(photo_field):
         try:
             with open(photo_field, "rb") as f:
                 return f.read()
         except Exception:
             return None
-    # if looks like base64 string
     if isinstance(photo_field, str):
         try:
             return base64.b64decode(photo_field)
@@ -374,11 +378,9 @@ def get_photo_bytes(photo_field):
 # SQLite helpers
 # ========================
 def db_connect():
-    # keep for compatibility where a short-lived connection is fine
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    # enable WAL for better concurrency
     try:
         cur.execute("PRAGMA journal_mode = WAL;")
         cur.execute(f"PRAGMA synchronous = {PRAGMA_SYNCHRONOUS};")
@@ -399,7 +401,6 @@ def db_transaction():
         conn.close()
 
 def init_db():
-    # initial table creation if DB absent
     if os.path.exists(DB_FILE):
         return
     with db_transaction() as conn:
@@ -423,7 +424,6 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
         """)
-        # participants now includes session_id (nullable)
         c.execute("""
             CREATE TABLE participants (
                 id INTEGER PRIMARY KEY,
@@ -442,7 +442,6 @@ def init_db():
                 FOREIGN KEY (project_id) REFERENCES projects(id)
             );
         """)
-        # sessions table
         c.execute("""
             CREATE TABLE sessions (
                 id INTEGER PRIMARY KEY,
@@ -472,12 +471,10 @@ def ensure_schema():
     """
     Ensure sessions table exists and participants has session_id column.
     Also add missing columns to sessions if DB was created earlier with a smaller schema.
-    Runs safely on existing DBs (best-effort).
     """
     try:
         with db_connect() as conn:
             cur = conn.cursor()
-            # ensure sessions table
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
             if not cur.fetchone():
                 cur.execute("""
@@ -491,19 +488,15 @@ def ensure_schema():
                         FOREIGN KEY (project_id) REFERENCES projects(id)
                     );
                 """)
-            # ensure session_id column on participants
             cur.execute("PRAGMA table_info(participants)")
-            cols = [r[1] for r in cur.fetchall()]  # name is at index 1
+            cols = [r[1] for r in cur.fetchall()]
             if "session_id" not in cols:
-                # SQLite has limited ALTER TABLE: add column
                 try:
                     cur.execute("ALTER TABLE participants ADD COLUMN session_id INTEGER;")
                 except Exception:
                     pass
-            # ensure sessions table has expected columns; if missing, add them
             cur.execute("PRAGMA table_info(sessions)")
             scols = [r[1] for r in cur.fetchall()]
-            # map of desired columns and types
             desired = {
                 "session_date": "TEXT",
                 "description": "TEXT",
@@ -511,21 +504,18 @@ def ensure_schema():
             }
             for col, ctype in desired.items():
                 if col not in scols:
-                    # safe ALTER TABLE ADD COLUMN
                     try:
                         cur.execute(f"ALTER TABLE sessions ADD COLUMN {col} {ctype};")
                     except Exception:
                         pass
             conn.commit()
     except Exception:
-        # fail silently; non-critical
         pass
 
 # ------------------------
 # log_action - needed early
 # ------------------------
 def log_action(user, action, details=""):
-    """Insert a log row into logs table. Best-effort: quietly ignore on failure."""
     try:
         with db_transaction() as conn:
             conn.execute(
@@ -592,7 +582,7 @@ def migrate_from_json_if_needed():
             if user_id:
                 projects = info.get("projects", {}) or {}
                 if not isinstance(projects, dict) or not projects:
-                    projects = {DEFAULT_PROJECT_NAME: {"description":"", "created_at": datetime.now().isoformat(), "participants":[] } }
+                    projects = {DEFAULT_PROJECT_NAME: {"description":"", "created_at": datetime.now().isoformat(), "participants":[]} }
                 for pname, pblock in projects.items():
                     if not isinstance(pblock, dict):
                         continue
@@ -716,12 +706,10 @@ def list_sessions_for_project(conn, project_id):
 def create_session(conn, project_id, name, session_date=None, description=""):
     c = conn.cursor()
     now = datetime.now().isoformat()
-    # Attempt to INSERT with all columns, but if the sessions table lacks some columns (old DB), fallback.
     try:
         c.execute("INSERT INTO sessions (project_id, name, session_date, description, created_at) VALUES (?, ?, ?, ?, ?)",
                   (project_id, name, session_date, description, now))
     except sqlite3.OperationalError:
-        # fallback: try minimal insert (project_id, name, created_at)
         try:
             c.execute("INSERT INTO sessions (project_id, name, created_at) VALUES (?, ?, ?)", (project_id, name, now))
         except Exception:
@@ -735,18 +723,11 @@ def get_session_by_id(conn, session_id):
     c.execute("SELECT * FROM sessions WHERE id=?", (session_id,))
     return c.fetchone()
 
-def get_session_by_name(conn, project_id, name):
-    c = conn.cursor()
-    c.execute("SELECT * FROM sessions WHERE project_id=? AND name=?", (project_id, name))
-    return c.fetchone()
-
 def update_session(conn, session_id, name, session_date, description):
     c = conn.cursor()
-    # Try to update all columns; if description missing, fall back
     try:
         c.execute("UPDATE sessions SET name=?, session_date=?, description=? WHERE id=?", (name, session_date, description, session_id))
     except sqlite3.OperationalError:
-        # try updating only name and session_date (if exists)
         try:
             c.execute("UPDATE sessions SET name=?, session_date=? WHERE id=?", (name, session_date, session_id))
         except Exception:
@@ -754,7 +735,6 @@ def update_session(conn, session_id, name, session_date, description):
 
 def delete_session(conn, session_id):
     c = conn.cursor()
-    # when deleting session, clear session_id from participants for safety, then remove session row
     c.execute("UPDATE participants SET session_id=NULL WHERE session_id=?", (session_id,))
     c.execute("DELETE FROM sessions WHERE id=?", (session_id,))
 
@@ -788,7 +768,218 @@ def delete_project_media(username, project_name):
         pass
 
 # ========================
-# UI: Auth
+# Backup & Restore helpers
+# ========================
+def make_db_backup():
+    """Copy current data.db to backups/ with timestamp and return path (or None)."""
+    try:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = os.path.join(BACKUPS_DIR, f"data.db.backup.{ts}.sqlite")
+        if os.path.exists(DB_FILE):
+            shutil.copy2(DB_FILE, backup_path)
+            return backup_path
+        return None
+    except Exception:
+        return None
+
+def make_media_backup():
+    """Create a zip archive of media/ into backups/, return path or None."""
+    try:
+        if not os.path.exists(MEDIA_DIR):
+            return None
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive_base = os.path.join(BACKUPS_DIR, f"media_backup_{ts}")
+        # make_archive will append .zip
+        shutil.make_archive(archive_base, 'zip', MEDIA_DIR)
+        return archive_base + ".zip"
+    except Exception:
+        return None
+
+def make_combined_backup():
+    """Create a single zip containing data.db and media/ for easy download/restore."""
+    try:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        tmpdir = tempfile.mkdtemp(prefix="backup_tmp_")
+        try:
+            # copy DB
+            if os.path.exists(DB_FILE):
+                shutil.copy2(DB_FILE, os.path.join(tmpdir, "data.db"))
+            # copy media if exists
+            if os.path.exists(MEDIA_DIR):
+                shutil.copytree(MEDIA_DIR, os.path.join(tmpdir, "media"))
+            archive_name = os.path.join(BACKUPS_DIR, f"full_backup_{ts}.zip")
+            shutil.make_archive(os.path.splitext(archive_name)[0], 'zip', tmpdir)
+            return archive_name
+        finally:
+            try:
+                shutil.rmtree(tmpdir)
+            except Exception:
+                pass
+    except Exception:
+        return None
+
+def list_backups():
+    """Return list of backup file names sorted by mtime desc."""
+    try:
+        os.makedirs(BACKUPS_DIR, exist_ok=True)
+        files = [f for f in os.listdir(BACKUPS_DIR) if os.path.isfile(os.path.join(BACKUPS_DIR, f))]
+        files.sort(key=lambda x: os.path.getmtime(os.path.join(BACKUPS_DIR, x)), reverse=True)
+        return files
+    except Exception:
+        return []
+
+def download_file_bytes(path):
+    """Return bytes for a given path or None."""
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
+
+def integrity_check_db_file(path):
+    """Run PRAGMA integrity_check on a DB file at path. Returns (ok_bool, message)."""
+    try:
+        conn = sqlite3.connect(path)
+        cur = conn.cursor()
+        cur.execute("PRAGMA integrity_check;")
+        res = cur.fetchone()
+        conn.close()
+        if res and isinstance(res[0], str) and res[0].lower().strip() == "ok":
+            return True, "ok"
+        else:
+            return False, res[0] if res else "integrity_check failed"
+    except Exception as e:
+        return False, f"error: {e}"
+
+def restore_db_from_uploaded(uploaded_file, create_backup=True):
+    """
+    uploaded_file is a Streamlit UploadedFile. This will:
+      - optionally backup current DB
+      - write uploaded_file to a temporary file
+      - integrity check it
+      - if ok, overwrite DB_FILE
+    Returns (success_bool, message)
+    """
+    if not uploaded_file:
+        return False, "No DB file provided."
+    try:
+        if create_backup:
+            make_db_backup()
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite")
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        data = uploaded_file.read()
+        with open(tmp.name, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        ok, msg = integrity_check_db_file(tmp.name)
+        if not ok:
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
+            return False, f"DB integrity check failed: {msg}"
+        # everything ok - move into place
+        try:
+            # make an additional timestamped copy of current DB (already done by make_db_backup)
+            shutil.copy2(tmp.name, DB_FILE)
+        except Exception:
+            # try replace via writing bytes
+            try:
+                with open(DB_FILE, "wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+            except Exception as e:
+                try:
+                    os.unlink(tmp.name)
+                except Exception:
+                    pass
+                return False, f"Unable to write DB file: {e}"
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+        return True, "DB restored successfully."
+    except Exception as e:
+        return False, f"Restore failed: {e}"
+
+def restore_media_from_uploaded(uploaded_zip, create_backup=True):
+    """
+    uploaded_zip is a Streamlit UploadedFile (zip). Behavior:
+      - optionally backup current media/ to backups/
+      - extract uploaded zip to a temp dir and then atomically replace MEDIA_DIR
+    Returns (success_bool, message)
+    """
+    if not uploaded_zip:
+        return False, "No media zip provided."
+    try:
+        if create_backup:
+            make_media_backup()
+        tmpdir = tempfile.mkdtemp(prefix="media_restore_tmp_")
+        tmpzip = os.path.join(tmpdir, "upload.zip")
+        try:
+            uploaded_zip.seek(0)
+        except Exception:
+            pass
+        with open(tmpzip, "wb") as f:
+            f.write(uploaded_zip.read())
+            f.flush()
+            os.fsync(f.fileno())
+        # attempt to unpack
+        try:
+            shutil.unpack_archive(tmpzip, tmpdir)
+        except Exception as e:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return False, f"Uploaded archive could not be unpacked: {e}"
+        # The unpacked root could be a folder containing 'media' or the contents directly.
+        # We'll search for a 'media' directory inside tmpdir; if not found, we'll treat tmpdir as media root.
+        candidate = None
+        for entry in os.listdir(tmpdir):
+            p = os.path.join(tmpdir, entry)
+            if os.path.isdir(p) and entry.lower() == "media":
+                candidate = p
+                break
+        if candidate is None:
+            # use tmpdir itself (minus the zip file)
+            candidate = tmpdir
+        # Now replace MEDIA_DIR atomically: move old to temp backup, move candidate to MEDIA_DIR
+        old_backup = None
+        try:
+            if os.path.exists(MEDIA_DIR):
+                old_backup = os.path.join(BACKUPS_DIR, f"media_pre_restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+                shutil.move(MEDIA_DIR, old_backup)
+            shutil.move(candidate, MEDIA_DIR)
+        except Exception as e:
+            # Attempt to restore old if we moved it away
+            try:
+                if os.path.exists(MEDIA_DIR):
+                    shutil.rmtree(MEDIA_DIR)
+            except Exception:
+                pass
+            if old_backup and os.path.exists(old_backup):
+                try:
+                    shutil.move(old_backup, MEDIA_DIR)
+                except Exception:
+                    pass
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return False, f"Unable to replace media folder: {e}"
+        # cleanup temp dirs (but keep old_backup in backups/ for safety)
+        try:
+            if os.path.exists(tmpdir):
+                # remove any leftover temp files but not the moved media
+                shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+        return True, "Media restored successfully."
+    except Exception as e:
+        return False, f"Restore failed: {e}"
+
+# ========================
+# UI: Auth + main app
 # ========================
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
@@ -806,40 +997,35 @@ if "_needs_refresh" not in st.session_state:
     st.session_state["_needs_refresh"] = False
 if "prefill_username" not in st.session_state:
     st.session_state["prefill_username"] = ""
-# Editing participant tracking
 if "editing_participant" not in st.session_state:
     st.session_state["editing_participant"] = None
-# Active session (per project) - store session id or None
 if "current_session_id" not in st.session_state:
     st.session_state["current_session_id"] = None
 
+# --- Authentication screens ---
 if not st.session_state["logged_in"]:
     st.title("🎬 Sacha's Casting Manager")
     choice = st.radio("Choose an option", ["Login", "Sign Up"], horizontal=True)
 
     if choice == "Login":
-        # prefill username if just signed up
         username = st.text_input("Username", value=st.session_state.get("prefill_username", ""))
-        # clear prefill after showing it once (so it doesn't persist forever)
         if st.session_state.get("prefill_username"):
             st.session_state["prefill_username"] = ""
         password = st.text_input("Password", type="password")
         login_btn = st.button("Login")
         if login_btn:
-            # admin backdoor
             if username == "admin" and password == "supersecret":
                 with db_transaction() as conn:
                     user = get_user_by_username(conn, "admin")
                     if not user:
                         create_user(conn, "admin", hash_password("supersecret"), role="Admin")
                     else:
-                        conn.execute("UPDATE users SET role=?, password=? WHERE username= ?", ("Admin", hash_password("supersecret"), "admin"))
+                        conn.execute("UPDATE users SET role=?, password=? WHERE username=?", ("Admin", hash_password("supersecret"), "admin"))
                     log_action("admin", "login", "backdoor")
                 st.session_state["logged_in"] = True
                 st.session_state["current_user"] = "admin"
                 st.success("Logged in as Admin ✅")
                 safe_rerun()
-            # normal login
             try:
                 conn = db_connect()
                 user = get_user_by_username(conn, username)
@@ -857,13 +1043,11 @@ if not st.session_state["logged_in"]:
             else:
                 st.error("Invalid credentials")
     else:
-        # Signup using a form to make submission reliable
         with st.form("signup_form"):
             new_user = st.text_input("New Username")
             new_pass = st.text_input("New Password", type="password")
             role = st.selectbox("Role", ["Casting Director", "Assistant"])
             signup_btn = st.form_submit_button("Sign Up")
-
         if signup_btn:
             if not new_user or not new_pass:
                 st.error("Please provide a username and password")
@@ -876,9 +1060,7 @@ if not st.session_state["logged_in"]:
                         else:
                             create_user(conn, new_user, hash_password(new_pass), role=role)
                             log_action(new_user, "signup", role)
-                            # prefill login with the created username for convenience
                             st.session_state["prefill_username"] = new_user
-                            # show confirmation but DO NOT rerun immediately so user sees the message
                             st.success("Account created! Please log in.")
                 except Exception as e:
                     st.error(f"Unable to create account: {e}")
@@ -920,7 +1102,7 @@ else:
     except Exception:
         st.session_state["participant_mode"] = st.sidebar.checkbox("Enable Participant Mode (Kiosk)", value=st.session_state.get("participant_mode", False))
 
-    # load user's projects (use cached connection + batched counts)
+    # load user's projects
     conn_read = get_db_conn()
     proj_rows = list_projects_with_counts(conn_read, user_id)
     if not proj_rows:
@@ -1004,9 +1186,7 @@ else:
                                     create_project(conn, user_id, p_name, p_desc or "")
                                     log_action(current_username, "create_project", p_name)
                                     st.success(f"Project '{p_name}' created.")
-                                    # set active project so later UI shows it
                                     st.session_state["current_project_name"] = p_name
-                                    # reset active session
                                     st.session_state["current_session_id"] = None
                         except Exception as e:
                             st.error(f"Unable to create project: {e}")
@@ -1135,7 +1315,6 @@ else:
         # Sessions Manager
         # ------------------------
         st.header("📅 Sessions")
-        # find current project id
         with db_connect() as conn:
             proj = get_project_by_name(conn, user_id, active)
         if not proj:
@@ -1165,19 +1344,15 @@ else:
                         except Exception as e:
                             st.error(f"Unable to create session: {e}")
 
-        # list sessions with actions
+        # list sessions
         with db_connect() as conn:
             sessions = list_sessions_for_project(conn, project_id)
 
-        # quick filter select for participants: All / Unassigned / <sessions>
         session_opts = [("All", None), ("Unassigned", 0)] + [(s["name"], s["id"]) for s in sessions]
         session_choice_label = st.selectbox("Filter participants by session", [o[0] for o in session_opts],
                                             index=0 if st.session_state.get("current_session_id") is None else next((i for i,o in enumerate(session_opts) if o[1]==st.session_state.get("current_session_id")), 0))
-        # set current_session_id accordingly
         chosen_idx = [o[0] for o in session_opts].index(session_choice_label)
         chosen_session_id = session_opts[chosen_idx][1]
-        # if Unassigned selected (0), interpret as None filter but show unassigned
-        # we store as special marker in session_state: -1 = Unassigned, None = All, other = session id
         if chosen_session_id is None:
             st.session_state["current_session_id"] = None
         elif chosen_session_id == 0:
@@ -1185,7 +1360,6 @@ else:
         else:
             st.session_state["current_session_id"] = chosen_session_id
 
-        # display sessions table with edit/delete actions
         if sessions:
             shdr = st.columns([4,2,4])
             shdr[0].markdown("**Session**"); shdr[1].markdown("**Date**"); shdr[2].markdown("**Actions**")
@@ -1198,7 +1372,6 @@ else:
                     st.session_state["current_session_id"] = s["id"]
                     safe_rerun()
                 if a2.button("Edit", key=f"editsess_{s['id']}"):
-                    # render a modal-like inline form
                     st.session_state["editing_session"] = s["id"]
                     safe_rerun()
                 if a3.button("Delete", key=f"delsess_{s['id']}"):
@@ -1241,7 +1414,6 @@ else:
                                         log_action(current_username, "delete_session", f"{active} :: {s['name']}")
                                     st.success(f"Session '{s['name']}' deleted.")
                                     st.session_state["confirm_delete_session"] = None
-                                    # if active session was this one, clear it
                                     if st.session_state.get("current_session_id") == s['id']:
                                         st.session_state["current_session_id"] = None
                                     safe_rerun()
@@ -1258,14 +1430,11 @@ else:
         # ------------------------
         # Participant management UI
         # ------------------------
-        # fetch project participants (apply session filter if set)
         with db_connect() as conn:
             cur = conn.cursor()
             if st.session_state.get("current_session_id") is None:
-                # show all
                 cur.execute("SELECT * FROM participants WHERE project_id=? ORDER BY id", (project_id,))
             elif st.session_state.get("current_session_id") == -1:
-                # unassigned only
                 cur.execute("SELECT * FROM participants WHERE project_id=? AND (session_id IS NULL) ORDER BY id", (project_id,))
             else:
                 cur.execute("SELECT * FROM participants WHERE project_id=? AND session_id=? ORDER BY id", (project_id, st.session_state.get("current_session_id")))
@@ -1285,7 +1454,6 @@ else:
                 pdress = st.text_input("Dress/Suit")
                 pavail = st.text_input("Next Availability")
                 photo = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"])
-                # allow optional assign to a session on add (quick)
                 with db_connect() as conn:
                     all_sessions = list_sessions_for_project(conn, project_id)
                 sess_choices = [("Unassigned", None)] + [(s["name"], s["id"]) for s in all_sessions]
@@ -1310,30 +1478,23 @@ else:
                     except Exception as e:
                         st.error(f"Unable to add participant: {e}")
 
-        # list participants (letter-box style with photo on top, details below)
+        # list participants
         if not participants:
             st.info("No participants yet.")
         else:
-            # prepare session lookup map for labels
             with db_connect() as conn:
                 sess_rows = list_sessions_for_project(conn, project_id)
             sess_map = {s["id"]: s["name"] for s in sess_rows}
             for p in participants:
                 pid = p["id"]
-                # container row: left = letterbox card (HTML), right = action buttons + assign form
                 left, right = st.columns([9,1])
-                # choose thumbnail or original
                 display_path = thumb_path_for(p["photo_path"])
                 data_uri = image_b64_for_path(display_path) if display_path else None
                 if data_uri:
                     img_tag = f"<img class='photo' src='{data_uri}' alt='photo'/>"
                 else:
                     img_tag = "<div class='photo' style='display:flex;align-items:center;justify-content:center;color:#777'>No Photo</div>"
-
-                # session label
                 sess_label = sess_map.get(p["session_id"], "Unassigned")
-
-                # Details HTML
                 name_html = (p["name"] or "Unnamed")
                 number_html = (p["number"] or "")
                 role_html = p["role"] or ""
@@ -1343,7 +1504,6 @@ else:
                 waist_html = p["waist"] or ""
                 dress_html = p["dress_suit"] or ""
                 avail_html = p["availability"] or ""
-
                 card_html = f"""
                     <div class="participant-letterbox">
                         {img_tag}
@@ -1357,18 +1517,15 @@ else:
                 """
                 left.markdown(card_html, unsafe_allow_html=True)
 
-                # Right column: Edit/Delete buttons (keep previous functionality), plus an Assign form
-                # Edit button triggers editing_participant state
+                # Edit button triggers editing_participant
                 if right.button("Edit", key=f"editbtn_{pid}"):
                     st.session_state["editing_participant"] = pid
                     safe_rerun()
 
-                # Assign form: choose target session and assign
+                # Assign form
                 with right.form(f"assign_form_{pid}", clear_on_submit=False):
-                    # build options: Unassigned + sessions
                     assign_choices = [("Unassigned", None)] + [(s["name"], s["id"]) for s in sess_rows]
                     assign_labels = [c[0] for c in assign_choices]
-                    # default index based on current p["session_id"]
                     default_idx = 0
                     if p["session_id"] is not None:
                         for i, c in enumerate(assign_choices):
@@ -1390,7 +1547,7 @@ else:
                         except Exception as e:
                             st.error(f"Unable to assign session: {e}")
 
-                # If this participant is in editing mode, render the form (with unique widget keys)
+                # If this participant is in editing mode, render the form
                 if st.session_state.get("editing_participant") == pid:
                     with st.form(f"edit_participant_form_{pid}"):
                         enumber = st.text_input("Number", value=p["number"] or "", key=f"enumber_{pid}")
@@ -1436,7 +1593,6 @@ else:
                                 remove_media_file(p["photo_path"])
                             conn.execute("DELETE FROM participants WHERE id=?", (pid,))
                             log_action(current_username, "delete_participant", p["name"] or "")
-                            # if we were editing this participant, clear the editing state
                             if st.session_state.get("editing_participant") == pid:
                                 st.session_state["editing_participant"] = None
                         st.warning("Participant deleted")
@@ -1457,7 +1613,6 @@ else:
                     if not parts:
                         st.info("No participants in this project yet.")
                     else:
-                        # build session id->name map
                         sess_map = {s['id']: s['name'] for s in list_sessions_for_project(conn, project_id)}
                         doc = Document()
                         doc.add_heading(f"Participants - {current}", 0)
@@ -1468,17 +1623,14 @@ else:
                             table.columns[1].width = Inches(4.5)
                             row_cells = table.rows[0].cells
 
-                            # Prefer thumbnail if available
                             display_path = thumb_path_for(safe_field(p, "photo_path", ""))
                             bytes_data = None
-                            # 1) try file bytes (thumb or original)
                             if display_path and os.path.exists(display_path):
                                 try:
                                     with open(display_path, "rb") as f:
                                         bytes_data = f.read()
                                 except Exception:
                                     bytes_data = None
-                            # 2) fallback: try stored path/raw base64
                             if bytes_data is None:
                                 bytes_data = get_photo_bytes(safe_field(p, "photo_path", ""))
 
@@ -1489,10 +1641,8 @@ else:
                                     paragraph = row_cells[0].paragraphs[0]
                                     run = paragraph.add_run()
                                     try:
-                                        # Try adding picture directly from BytesIO
                                         run.add_picture(image_stream, width=Inches(1.5))
                                     except Exception:
-                                        # Fallback: write to a temp file and pass the filename
                                         tf = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
                                         try:
                                             tf.write(bytes_data)
@@ -1525,7 +1675,6 @@ else:
                             row_cells[1].text = info_text
                             doc.add_paragraph("\n")
 
-                        # Save to BytesIO and provide download button
                         word_stream = io.BytesIO()
                         doc.save(word_stream)
                         word_stream.seek(0)
@@ -1538,68 +1687,102 @@ else:
             except Exception as e:
                 st.error(f"Unable to generate Word file: {e}")
 
-        # Admin dashboard (unchanged)
+        # ------------------------
+        # Admin dashboard + backup & restore UI
+        # ------------------------
         if role == "Admin":
             st.header("👑 Admin Dashboard")
             if st.button("🔄 Refresh Users"):
                 safe_rerun()
 
-            # -- Migration / Backup tools for admins --
-            with st.expander("🔧 Database Migration & Backup (Admin)", expanded=False):
-                st.write("Use this to create a safe backup of the database and apply schema migrations. Recommended before major upgrades.")
-                colb, cole = st.columns([2,3])
-                make_backup = colb.checkbox("Create backup before migrating", value=True)
-                show_backups = cole.checkbox("Show existing backups", value=False)
+            # Backup tools
+            with st.expander("🗄️ Backups & Restore (Admin)", expanded=False):
+                st.write("Create backups, download existing backups, or restore DB/media from uploads. **Always create a backup first.**")
 
-                if show_backups:
-                    try:
-                        bdir = "backups"
-                        os.makedirs(bdir, exist_ok=True)
-                        files = sorted([f for f in os.listdir(bdir) if os.path.isfile(os.path.join(bdir,f))], reverse=True)
-                        if not files:
-                            st.info("No backups found.")
-                        else:
-                            for f in files[:20]:
-                                st.markdown(f"- `{f}`")
-                    except Exception as e:
-                        st.error(f"Unable to list backups: {e}")
+                col1, col2, col3 = st.columns([2,2,3])
+                if col1.button("Create DB Backup"):
+                    bp = make_db_backup()
+                    if bp:
+                        st.success(f"DB backup created: {bp}")
+                    else:
+                        st.warning("No DB file found to back up.")
 
-                if st.button("Run DB Backup & Migration", key="run_migration_btn"):
-                    backup_path = None
-                    # create backups dir
-                    try:
-                        os.makedirs("backups", exist_ok=True)
-                    except Exception:
-                        pass
+                if col2.button("Create Media Backup (zip)"):
+                    mp = make_media_backup()
+                    if mp:
+                        st.success(f"Media backup created: {mp}")
+                    else:
+                        st.info("No media folder to back up.")
 
-                    if make_backup:
+                if col3.button("Create Combined Backup (DB + media zip)"):
+                    cb = make_combined_backup()
+                    if cb:
+                        st.success(f"Combined backup created: {cb}")
+                    else:
+                        st.error("Failed to create combined backup.")
+
+                st.markdown("---")
+                st.subheader("Existing Backups")
+                backups = list_backups()
+                if not backups:
+                    st.info("No backups found.")
+                else:
+                    for fname in backups[:50]:
+                        fp = os.path.join(BACKUPS_DIR, fname)
+                        cols = st.columns([6,2,2])
+                        cols[0].markdown(f"`{fname}`")
+                        size = os.path.getsize(fp)
+                        cols[1].markdown(f"{round(size/1024,2)} KB")
+                        data = None
                         try:
-                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            backup_path = os.path.join("backups", f"data.db.backup.{ts}.sqlite")
-                            # copy DB file if exists
-                            if os.path.exists(DB_FILE):
-                                shutil.copy2(DB_FILE, backup_path)
-                                st.success(f"Backup created: {backup_path}")
-                            else:
-                                st.warning("No DB file found to back up.")
-                                backup_path = None
-                        except Exception as e:
-                            st.error(f"Backup failed: {e}")
-                            backup_path = None
+                            data = open(fp, "rb").read()
+                        except Exception:
+                            data = None
+                        if data:
+                            cols[2].download_button("Download", data=data, file_name=fname, key=f"dl_{fname}")
+                        else:
+                            cols[2].write("Unavailable")
 
-                    # run migration steps (ensure schema + migrate from users.json)
-                    try:
-                        ensure_schema()
-                        migrate_from_json_if_needed()
-                        st.success("Schema migration completed (ensure_schema + migrate_from_json_if_needed).")
-                        log_action(current_username, "run_migration", f"backup={backup_path}")
-                        # refresh UI to pick up any schema changes
-                        safe_rerun()
-                    except Exception as e:
-                        st.error(f"Migration failed: {e}")
+                st.markdown("---")
+                st.subheader("Restore from Upload")
+                st.write("You can upload a DB file (.sqlite/.db) to replace the active database, and optionally upload a media .zip to replace the media/ folder.")
+                with st.form("restore_form"):
+                    make_backup_before = st.checkbox("Create backup before restoring (recommended)", value=True)
+                    uploaded_db = st.file_uploader("Upload DB file (.sqlite/.db)", type=["sqlite", "db", "sqlite3"])
+                    uploaded_media = st.file_uploader("Upload media zip (.zip) - optional", type=["zip"])
+                    confirm = st.checkbox("I understand this will overwrite current DB and/or media", value=False)
+                    do_restore = st.form_submit_button("Restore")
+                    if do_restore:
+                        if not confirm:
+                            st.error("Please confirm the overwrite checkbox to proceed.")
+                        else:
+                            results = []
+                            if uploaded_db:
+                                st.info("Restoring DB (this may take a moment)...")
+                                ok, msg = restore_db_from_uploaded(uploaded_db, create_backup=make_backup_before)
+                                if ok:
+                                    st.success(msg)
+                                    results.append(("db", True, msg))
+                                else:
+                                    st.error(msg)
+                                    results.append(("db", False, msg))
+                            if uploaded_media:
+                                st.info("Restoring media (this may take a moment)...")
+                                ok2, msg2 = restore_media_from_uploaded(uploaded_media, create_backup=make_backup_before)
+                                if ok2:
+                                    st.success(msg2)
+                                    results.append(("media", True, msg2))
+                                else:
+                                    st.error(msg2)
+                                    results.append(("media", False, msg2))
+                            if not uploaded_db and not uploaded_media:
+                                st.info("No files uploaded.")
+                            # log action
+                            log_action(current_username, "restore_attempt", json.dumps(results))
+                            # refresh UI
+                            safe_rerun()
 
-            # -- End migration tools --
-
+            # Standard Admin user management below
             with db_connect() as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT * FROM users ORDER BY username COLLATE NOCASE")

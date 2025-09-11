@@ -1,4 +1,4 @@
-# sachas_casting_manager_sqlite_sessions_full_backups_restore_bulk_move_copy_name_fix.py
+# sachas_casting_manager_sqlite_sessions_full_backups_restore_bulk_move_copy_name_fix_pagination.py
 """
 Sacha's Casting Manager
 - SQLite backend with sessions support
@@ -6,6 +6,7 @@ Sacha's Casting Manager
 - Thumbnail generation & caching
 - Admin tools: DB backup, combined DB+media zip, download backups, restore DB/media (safe)
 - Bulk Move/Copy participants between sessions (multi-select)
+- Pagination ("Load more") + cache invalidation for media changes
 """
 import streamlit as st
 import sqlite3
@@ -37,6 +38,9 @@ MEDIA_DIR = "media"
 MIGRATION_MARKER = os.path.join(MEDIA_DIR, ".db_migrated")
 BACKUPS_DIR = "backups"
 DEFAULT_PROJECT_NAME = "Default Project"
+
+# Pagination
+PAGE_SIZE = 12
 
 # SQLite pragmas
 PRAGMA_WAL = "WAL"
@@ -93,7 +97,24 @@ st.markdown("""
   gap:12px;
   align-items:flex-start;
   margin-bottom: 10px;
+}
 
+/* Responsive */
+@media (max-width: 900px) {
+  .participant-letterbox .photo { height: 160px; }
+}
+@media (max-width: 600px) {
+  .participant-letterbox { max-width: 100%; padding: 6px; }
+  .participant-letterbox .photo { height: 140px; }
+  .part-row { flex-direction: column; }
+}
+
+/* Buttons slightly larger for touch */
+.stButton>button, button {
+  padding: .55rem .9rem !important;
+  font-size: 0.98rem !important;
+}
+</style>
 """, unsafe_allow_html=True)
 
 # ========================
@@ -199,6 +220,21 @@ def image_b64_for_path(path):
         return f"data:{mime};base64,{b64}"
     except Exception:
         return None
+
+def clear_image_cache():
+    """Clear cached image base64 data so new uploads/edits show immediately."""
+    try:
+        # Preferred: clear the specific cached function
+        if hasattr(image_b64_for_path, "clear"):
+            image_b64_for_path.clear()
+        else:
+            # Fallback: clear all cache_data (heavier but safe)
+            st.cache_data.clear()
+    except Exception:
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
 
 def thumb_path_for(photo_path):
     """Return path to thumbnail if exists, otherwise original path if exists, else None."""
@@ -993,6 +1029,11 @@ if "editing_participant" not in st.session_state:
     st.session_state["editing_participant"] = None
 if "current_session_id" not in st.session_state:
     st.session_state["current_session_id"] = None
+# paging state
+if "_participants_proj_sess_key" not in st.session_state:
+    st.session_state["_participants_proj_sess_key"] = None
+if "participants_offset" not in st.session_state:
+    st.session_state["participants_offset"] = 0
 
 # --- Authentication screens ---
 if not st.session_state["logged_in"]:
@@ -1144,6 +1185,9 @@ else:
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (pid, number, name, role_in, age, agency, height, waist, dress_suit, availability, photo_path))
                     log_action(current_username, "participant_checkin", name)
+                # clear caches + reset paging so user sees their entry
+                clear_image_cache()
+                st.session_state["participants_offset"] = 0
                 st.success("✅ Thanks for checking in!")
                 safe_rerun()
 
@@ -1220,6 +1264,8 @@ else:
             if a1.button("Set Active", key=f"setactive_{name}"):
                 st.session_state["current_project_name"] = name
                 st.session_state["current_session_id"] = None
+                # reset paging for new project
+                st.session_state["participants_offset"] = 0
                 safe_rerun()
             if a2.button("Edit", key=f"editproj_{name}"):
                 st.session_state["editing_project"] = name
@@ -1294,6 +1340,8 @@ else:
                                     st.session_state["current_project_name"] = None
                                     st.session_state["current_session_id"] = None
                                 st.session_state["confirm_delete_project"] = None
+                                # reset paging
+                                st.session_state["participants_offset"] = 0
                                 safe_rerun()
                             except Exception as e:
                                 st.error(f"Unable to delete project: {e}")
@@ -1362,6 +1410,8 @@ else:
                 a1, a2, a3 = cols[2].columns([1,1,1])
                 if a1.button("Set Active", key=f"setsess_{s['id']}"):
                     st.session_state["current_session_id"] = s["id"]
+                    # reset paging for session change
+                    st.session_state["participants_offset"] = 0
                     safe_rerun()
                 if a2.button("Edit", key=f"editsess_{s['id']}"):
                     st.session_state["editing_session"] = s["id"]
@@ -1408,6 +1458,8 @@ else:
                                     st.session_state["confirm_delete_session"] = None
                                     if st.session_state.get("current_session_id") == s['id']:
                                         st.session_state["current_session_id"] = None
+                                    # reset paging after deletion
+                                    st.session_state["participants_offset"] = 0
                                     safe_rerun()
                                 except Exception as e:
                                     st.error(f"Unable to delete session: {e}")
@@ -1420,19 +1472,37 @@ else:
             st.info("No sessions for this project yet. Create one above.")
 
         # ------------------------
-        # Participant management UI
+        # Participant management UI (PAGINATED)
         # ------------------------
+        # Determine whether project/session changed and reset paging if needed
+        proj_sess_key = f"{active}:{st.session_state.get('current_session_id')}"
+        if st.session_state.get("_participants_proj_sess_key") != proj_sess_key:
+            st.session_state["_participants_proj_sess_key"] = proj_sess_key
+            st.session_state["participants_offset"] = 0
+
+        offset = st.session_state.get("participants_offset", 0)
+
+        # Count + fetch page
         with db_connect() as conn:
             cur = conn.cursor()
             if st.session_state.get("current_session_id") is None:
-                cur.execute("SELECT * FROM participants WHERE project_id=? ORDER BY id", (project_id,))
+                cur.execute("SELECT COUNT(*) AS cnt FROM participants WHERE project_id=?", (project_id,))
             elif st.session_state.get("current_session_id") == -1:
-                cur.execute("SELECT * FROM participants WHERE project_id=? AND (session_id IS NULL) ORDER BY id", (project_id,))
+                cur.execute("SELECT COUNT(*) AS cnt FROM participants WHERE project_id=? AND session_id IS NULL", (project_id,))
             else:
-                cur.execute("SELECT * FROM participants WHERE project_id=? AND session_id=? ORDER BY id", (project_id, st.session_state.get("current_session_id")))
+                cur.execute("SELECT COUNT(*) AS cnt FROM participants WHERE project_id=? AND session_id=?", (project_id, st.session_state.get("current_session_id")))
+            total = cur.fetchone()["cnt"]
+
+            if st.session_state.get("current_session_id") is None:
+                cur.execute("SELECT * FROM participants WHERE project_id=? ORDER BY id LIMIT ? OFFSET ?", (project_id, PAGE_SIZE, offset))
+            elif st.session_state.get("current_session_id") == -1:
+                cur.execute("SELECT * FROM participants WHERE project_id=? AND session_id IS NULL ORDER BY id LIMIT ? OFFSET ?", (project_id, PAGE_SIZE, offset))
+            else:
+                cur.execute("SELECT * FROM participants WHERE project_id=? AND session_id=? ORDER BY id LIMIT ? OFFSET ?", (project_id, st.session_state.get("current_session_id"), PAGE_SIZE, offset))
             participants = cur.fetchall()
 
         st.header(f"👥 Participants — {active}")
+        st.caption(f"Showing {0 if total==0 else offset+1}–{min(offset+len(participants), total)} of {total}")
 
         # --- NEW: Bulk multi-select move/copy UI ---
         st.subheader("Bulk actions — Move / Copy participants between sessions")
@@ -1480,6 +1550,9 @@ else:
                                     conn.execute(q, (tgt, pid))
                                 log_action(current_username, "bulk_move", json.dumps({"ids":ids,"target":target_session_id}))
                                 st.success(f"Moved {len(ids)} participant(s).")
+                                # clear caches + reset paging
+                                clear_image_cache()
+                                st.session_state["participants_offset"] = 0
                             else:
                                 # Copy: duplicate participant rows (including photo copy)
                                 copied = 0
@@ -1493,6 +1566,8 @@ else:
                                             copied += 1
                                 log_action(current_username, "bulk_copy", json.dumps({"ids":ids,"target":target_session_id,"copied":copied}))
                                 st.success(f"Copied {copied} participant(s).")
+                                clear_image_cache()
+                                st.session_state["participants_offset"] = 0
                         safe_rerun()
                     except Exception as e:
                         st.error(f"Bulk action failed: {e}")
@@ -1529,14 +1604,20 @@ else:
                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (project_id, assign_id, number, pname, prole, page, pagency, pheight, pwaist, pdress, pavail, photo_path))
                             log_action(current_username, "add_participant", pname)
+                        # clear caches + reset paging so new participant is visible
+                        clear_image_cache()
+                        st.session_state["participants_offset"] = 0
                         st.success("Participant added!")
                         safe_rerun()
                     except Exception as e:
                         st.error(f"Unable to add participant: {e}")
 
-        # list participants
+        # list participants (paginated)
         if not participants:
-            st.info("No participants yet.")
+            if total == 0:
+                st.info("No participants yet.")
+            else:
+                st.info("No more participants to show on this page.")
         else:
             with db_connect() as conn:
                 sess_rows = list_sessions_for_project(conn, project_id)
@@ -1601,6 +1682,9 @@ else:
                             with db_transaction() as conn:
                                 conn.execute("UPDATE participants SET session_id=? WHERE id=?", (target_id, pid))
                                 log_action(current_username, "assign_session", f"{safe_field(p,'name','')} -> {sel}")
+                            # reset paging so changes are visible
+                            clear_image_cache()
+                            st.session_state["participants_offset"] = 0
                             st.success("Assignment updated.")
                             safe_rerun()
                         except Exception as e:
@@ -1635,6 +1719,9 @@ else:
                                         WHERE id=?
                                     """, (enumber, ename, erole, eage, eagency, eheight, ewaist, edress, eavail, new_photo_path, pid))
                                     log_action(current_username, "edit_participant", ename)
+                                # clear caches + reset paging so edit is visible
+                                clear_image_cache()
+                                st.session_state["participants_offset"] = 0
                                 st.success("Participant updated!")
                                 st.session_state["editing_participant"] = None
                                 safe_rerun()
@@ -1654,10 +1741,24 @@ else:
                             log_action(current_username, "delete_participant", p["name"] or "")
                             if st.session_state.get("editing_participant") == pid:
                                 st.session_state["editing_participant"] = None
+                        # clear caches + reset paging after delete
+                        clear_image_cache()
+                        st.session_state["participants_offset"] = 0
                         st.warning("Participant deleted")
                         safe_rerun()
                     except Exception as e:
                         st.error(f"Unable to delete participant: {e}")
+
+        # Load more / show first page controls
+        if offset + PAGE_SIZE < total:
+            if st.button("Load more participants"):
+                st.session_state["participants_offset"] = offset + PAGE_SIZE
+                safe_rerun()
+
+        if offset > 0:
+            if st.button("Show first page"):
+                st.session_state["participants_offset"] = 0
+                safe_rerun()
 
         # ------------------------
         # Export to Word (fixed safe_field usage)
@@ -1837,6 +1938,8 @@ else:
                             if not uploaded_db and not uploaded_media:
                                 st.info("No files uploaded.")
                             log_action(current_username, "restore_attempt", json.dumps(results))
+                            # Clear caches after restore
+                            clear_image_cache()
                             safe_rerun()
 
             # Standard Admin user management below

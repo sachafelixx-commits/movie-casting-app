@@ -1,8 +1,8 @@
-# sachas_casting_manager_sqlite_sessions_full_backups_restore_bulk_move_copy.py
+# sachas_casting_manager_sqlite_sessions_full_backups_restore_bulk_move_copy_name_fix.py
 """
 Sacha's Casting Manager
 - SQLite backend with sessions support
-- Letter-box participant cards
+- Letter-box participant cards (name color fixed)
 - Thumbnail generation & caching
 - Admin tools: DB backup, combined DB+media zip, download backups, restore DB/media (safe)
 - Bulk Move/Copy participants between sessions (multi-select)
@@ -46,7 +46,7 @@ PRAGMA_SYNCHRONOUS = "NORMAL"
 os.makedirs(BACKUPS_DIR, exist_ok=True)
 
 # ========================
-# Inject UI CSS for letter-box participant cards
+# Inject UI CSS for letter-box participant cards (name color fixed)
 # ========================
 st.markdown("""
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -70,10 +70,12 @@ st.markdown("""
   background: #f6f6f6;
   margin-bottom: 8px;
 }
+/* make name text dark so it is readable on all themes/backgrounds */
 .participant-letterbox .name {
   font-weight: 700;
   font-size: 1.05rem;
   margin-bottom: 6px;
+  color: #111 !important;
 }
 .participant-letterbox .meta {
   color: rgba(0,0,0,0.6);
@@ -809,7 +811,7 @@ def duplicate_participant_row(conn, p_row, target_session_id, username, project_
         return None
 
 # ========================
-# Backup & Restore helpers (unchanged)
+# Backup & Restore helpers
 # ========================
 def make_db_backup():
     try:
@@ -1566,15 +1568,18 @@ else:
                 else:
                     img_tag = "<div class='photo' style='display:flex;align-items:center;justify-content:center;color:#777'>No Photo</div>"
                 sess_label = sess_map.get(p["session_id"], "Unassigned")
-                name_html = (p["name"] or "Unnamed")
-                number_html = (p["number"] or "")
-                role_html = p["role"] or ""
-                age_html = p["age"] or ""
-                agency_html = p["agency"] or ""
-                height_html = p["height"] or ""
-                waist_html = p["waist"] or ""
-                dress_html = p["dress_suit"] or ""
-                avail_html = p["availability"] or ""
+
+                # Use safe_field for all displayed fields so names are always readable and None-safe
+                name_html = safe_field(p, "name", "Unnamed")
+                number_html = safe_field(p, "number", "")
+                role_html = safe_field(p, "role", "")
+                age_html = safe_field(p, "age", "")
+                agency_html = safe_field(p, "agency", "")
+                height_html = safe_field(p, "height", "")
+                waist_html = safe_field(p, "waist", "")
+                dress_html = safe_field(p, "dress_suit", "")
+                avail_html = safe_field(p, "availability", "")
+
                 card_html = f"""
                     <div class="participant-letterbox">
                         {img_tag}
@@ -1621,15 +1626,15 @@ else:
                 # If this participant is in editing mode, render the form
                 if st.session_state.get("editing_participant") == pid:
                     with st.form(f"edit_participant_form_{pid}"):
-                        enumber = st.text_input("Number", value=p["number"] or "", key=f"enumber_{pid}")
-                        ename = st.text_input("Name", value=p["name"] or "", key=f"ename_{pid}")
-                        erole = st.text_input("Role", value=p["role"] or "", key=f"erole_{pid}")
-                        eage = st.text_input("Age", value=p["age"] or "", key=f"eage_{pid}")
-                        eagency = st.text_input("Agency", value=p["agency"] or "", key=f"eagency_{pid}")
-                        eheight = st.text_input("Height", value=p["height"] or "", key=f"eheight_{pid}")
-                        ewaist = st.text_input("Waist", value=p["waist"] or "", key=f"ewaist_{pid}")
-                        edress = st.text_input("Dress/Suit", value=p["dress_suit"] or "", key=f"edress_{pid}")
-                        eavail = st.text_input("Next Availability", value=p["availability"] or "", key=f'eavail_{pid}')
+                        enumber = st.text_input("Number", value=safe_field(p, "number", ""), key=f"enumber_{pid}")
+                        ename = st.text_input("Name", value=safe_field(p, "name", ""), key=f"ename_{pid}")
+                        erole = st.text_input("Role", value=safe_field(p, "role", ""), key=f"erole_{pid}")
+                        eage = st.text_input("Age", value=safe_field(p, "age", ""), key=f"eage_{pid}")
+                        eagency = st.text_input("Agency", value=safe_field(p, "agency", ""), key=f"eagency_{pid}")
+                        eheight = st.text_input("Height", value=safe_field(p, "height", ""), key=f"eheight_{pid}")
+                        ewaist = st.text_input("Waist", value=safe_field(p, "waist", ""), key=f"ewaist_{pid}")
+                        edress = st.text_input("Dress/Suit", value=safe_field(p, "dress_suit", ""), key=f"edress_{pid}")
+                        eavail = st.text_input("Next Availability", value=safe_field(p, "availability", ""), key=f'eavail_{pid}')
                         ephoto = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"], key=f"ephoto_{pid}")
                         save_edit = st.form_submit_button("Save Changes")
                         cancel_edit = st.form_submit_button("Cancel")
@@ -1686,7 +1691,7 @@ else:
                     else:
                         sess_map = {s['id']: s['name'] for s in list_sessions_for_project(conn, project_id)}
                         doc = Document()
-                        doc.add_heading(f"Participants - {current}", 0)
+                        doc.add_heading(f"Participants - {active}", 0)
                         for p in parts:
                             table = doc.add_table(rows=1, cols=2)
                             table.autofit = False
@@ -1752,14 +1757,14 @@ else:
                         st.download_button(
                             label="Click to download Word file",
                             data=word_stream,
-                            file_name=f"{current}_participants.docx",
+                            file_name=f"{active}_participants.docx",
                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                         )
             except Exception as e:
                 st.error(f"Unable to generate Word file: {e}")
 
         # ------------------------
-        # Admin dashboard + backup & restore UI (unchanged)
+        # Admin dashboard + backup & restore UI
         # ------------------------
         if role == "Admin":
             st.header("👑 Admin Dashboard")

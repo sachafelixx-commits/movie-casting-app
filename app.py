@@ -1,11 +1,11 @@
-# sachas_casting_manager_sqlite_sessions_full_backups_restore.py
+# sachas_casting_manager_sqlite_sessions_full_backups_restore_bulk_move_copy.py
 """
 Sacha's Casting Manager
 - SQLite backend with sessions support
 - Letter-box participant cards
 - Thumbnail generation & caching
 - Admin tools: DB backup, combined DB+media zip, download backups, restore DB/media (safe)
-- Robust schema ensure + migration from users.json
+- Bulk Move/Copy participants between sessions (multi-select)
 """
 import streamlit as st
 import sqlite3
@@ -375,7 +375,7 @@ def get_photo_bytes(photo_field):
     return None
 
 # ========================
-# SQLite helpers
+# DB helpers & schema
 # ========================
 def db_connect():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -768,10 +768,50 @@ def delete_project_media(username, project_name):
         pass
 
 # ========================
-# Backup & Restore helpers
+# NEW: duplicate participant helper (for Copy action)
+# ========================
+def duplicate_participant_row(conn, p_row, target_session_id, username, project_name):
+    """
+    Duplicate a participant row (p_row: sqlite3.Row) into the same project with session set to target_session_id.
+    Copies the photo file (if any) into a new file + thumbnail using save_photo_bytes.
+    Returns new participant id or None on failure.
+    """
+    try:
+        bytes_data = None
+        old_photo = safe_field(p_row, "photo_path", "")
+        if old_photo:
+            bytes_data = get_photo_bytes(old_photo)
+        new_photo_path = None
+        if bytes_data:
+            # save a fresh copy to media/<username>/<project>
+            new_photo_path = save_photo_bytes(bytes_data, username, project_name)
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO participants
+            (project_id, session_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            p_row["project_id"],
+            target_session_id,
+            safe_field(p_row, "number", ""),
+            safe_field(p_row, "name", ""),
+            safe_field(p_row, "role", ""),
+            safe_field(p_row, "age", ""),
+            safe_field(p_row, "agency", ""),
+            safe_field(p_row, "height", ""),
+            safe_field(p_row, "waist", ""),
+            safe_field(p_row, "dress_suit", ""),
+            safe_field(p_row, "availability", ""),
+            new_photo_path
+        ))
+        return c.lastrowid
+    except Exception:
+        return None
+
+# ========================
+# Backup & Restore helpers (unchanged)
 # ========================
 def make_db_backup():
-    """Copy current data.db to backups/ with timestamp and return path (or None)."""
     try:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = os.path.join(BACKUPS_DIR, f"data.db.backup.{ts}.sqlite")
@@ -783,28 +823,23 @@ def make_db_backup():
         return None
 
 def make_media_backup():
-    """Create a zip archive of media/ into backups/, return path or None."""
     try:
         if not os.path.exists(MEDIA_DIR):
             return None
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         archive_base = os.path.join(BACKUPS_DIR, f"media_backup_{ts}")
-        # make_archive will append .zip
         shutil.make_archive(archive_base, 'zip', MEDIA_DIR)
         return archive_base + ".zip"
     except Exception:
         return None
 
 def make_combined_backup():
-    """Create a single zip containing data.db and media/ for easy download/restore."""
     try:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         tmpdir = tempfile.mkdtemp(prefix="backup_tmp_")
         try:
-            # copy DB
             if os.path.exists(DB_FILE):
                 shutil.copy2(DB_FILE, os.path.join(tmpdir, "data.db"))
-            # copy media if exists
             if os.path.exists(MEDIA_DIR):
                 shutil.copytree(MEDIA_DIR, os.path.join(tmpdir, "media"))
             archive_name = os.path.join(BACKUPS_DIR, f"full_backup_{ts}.zip")
@@ -819,7 +854,6 @@ def make_combined_backup():
         return None
 
 def list_backups():
-    """Return list of backup file names sorted by mtime desc."""
     try:
         os.makedirs(BACKUPS_DIR, exist_ok=True)
         files = [f for f in os.listdir(BACKUPS_DIR) if os.path.isfile(os.path.join(BACKUPS_DIR, f))]
@@ -829,7 +863,6 @@ def list_backups():
         return []
 
 def download_file_bytes(path):
-    """Return bytes for a given path or None."""
     try:
         with open(path, "rb") as f:
             return f.read()
@@ -837,7 +870,6 @@ def download_file_bytes(path):
         return None
 
 def integrity_check_db_file(path):
-    """Run PRAGMA integrity_check on a DB file at path. Returns (ok_bool, message)."""
     try:
         conn = sqlite3.connect(path)
         cur = conn.cursor()
@@ -852,14 +884,6 @@ def integrity_check_db_file(path):
         return False, f"error: {e}"
 
 def restore_db_from_uploaded(uploaded_file, create_backup=True):
-    """
-    uploaded_file is a Streamlit UploadedFile. This will:
-      - optionally backup current DB
-      - write uploaded_file to a temporary file
-      - integrity check it
-      - if ok, overwrite DB_FILE
-    Returns (success_bool, message)
-    """
     if not uploaded_file:
         return False, "No DB file provided."
     try:
@@ -882,12 +906,9 @@ def restore_db_from_uploaded(uploaded_file, create_backup=True):
             except Exception:
                 pass
             return False, f"DB integrity check failed: {msg}"
-        # everything ok - move into place
         try:
-            # make an additional timestamped copy of current DB (already done by make_db_backup)
             shutil.copy2(tmp.name, DB_FILE)
         except Exception:
-            # try replace via writing bytes
             try:
                 with open(DB_FILE, "wb") as f:
                     f.write(data)
@@ -908,12 +929,6 @@ def restore_db_from_uploaded(uploaded_file, create_backup=True):
         return False, f"Restore failed: {e}"
 
 def restore_media_from_uploaded(uploaded_zip, create_backup=True):
-    """
-    uploaded_zip is a Streamlit UploadedFile (zip). Behavior:
-      - optionally backup current media/ to backups/
-      - extract uploaded zip to a temp dir and then atomically replace MEDIA_DIR
-    Returns (success_bool, message)
-    """
     if not uploaded_zip:
         return False, "No media zip provided."
     try:
@@ -929,14 +944,11 @@ def restore_media_from_uploaded(uploaded_zip, create_backup=True):
             f.write(uploaded_zip.read())
             f.flush()
             os.fsync(f.fileno())
-        # attempt to unpack
         try:
             shutil.unpack_archive(tmpzip, tmpdir)
         except Exception as e:
             shutil.rmtree(tmpdir, ignore_errors=True)
             return False, f"Uploaded archive could not be unpacked: {e}"
-        # The unpacked root could be a folder containing 'media' or the contents directly.
-        # We'll search for a 'media' directory inside tmpdir; if not found, we'll treat tmpdir as media root.
         candidate = None
         for entry in os.listdir(tmpdir):
             p = os.path.join(tmpdir, entry)
@@ -944,9 +956,7 @@ def restore_media_from_uploaded(uploaded_zip, create_backup=True):
                 candidate = p
                 break
         if candidate is None:
-            # use tmpdir itself (minus the zip file)
             candidate = tmpdir
-        # Now replace MEDIA_DIR atomically: move old to temp backup, move candidate to MEDIA_DIR
         old_backup = None
         try:
             if os.path.exists(MEDIA_DIR):
@@ -954,7 +964,6 @@ def restore_media_from_uploaded(uploaded_zip, create_backup=True):
                 shutil.move(MEDIA_DIR, old_backup)
             shutil.move(candidate, MEDIA_DIR)
         except Exception as e:
-            # Attempt to restore old if we moved it away
             try:
                 if os.path.exists(MEDIA_DIR):
                     shutil.rmtree(MEDIA_DIR)
@@ -967,10 +976,8 @@ def restore_media_from_uploaded(uploaded_zip, create_backup=True):
                     pass
             shutil.rmtree(tmpdir, ignore_errors=True)
             return False, f"Unable to replace media folder: {e}"
-        # cleanup temp dirs (but keep old_backup in backups/ for safety)
         try:
             if os.path.exists(tmpdir):
-                # remove any leftover temp files but not the moved media
                 shutil.rmtree(tmpdir, ignore_errors=True)
         except Exception:
             pass
@@ -1442,6 +1449,70 @@ else:
 
         st.header(f"👥 Participants — {active}")
 
+        # --- NEW: Bulk multi-select move/copy UI ---
+        st.subheader("Bulk actions — Move / Copy participants between sessions")
+        with db_connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id, name, number, session_id FROM participants WHERE project_id=? ORDER BY id", (project_id,))
+            all_parts_for_bulk = cur.fetchall()
+        bulk_options = []
+        for r in all_parts_for_bulk:
+            display = f"{r['id']} | {r['name'] or 'Unnamed'} | #{r['number'] or ''} | Session:{(r['session_id'] or 'Unassigned')}"
+            bulk_options.append(display)
+        bulk_selected = st.multiselect("Select participants (multi-select)", bulk_options, key="bulk_participants_select")
+        # target session choices
+        session_choices_for_ui = [("Unassigned", None)] + [(s["name"], s["id"]) for s in sessions]
+        session_labels = [c[0] for c in session_choices_for_ui]
+        target_label = st.selectbox("Target session", session_labels, index=0, key="bulk_target_session")
+        target_idx = session_labels.index(target_label)
+        target_session_id = session_choices_for_ui[target_idx][1]
+        action_choice = st.radio("Action", ["Move (cut)","Copy"], index=0, horizontal=True)
+        if st.button("Apply bulk action"):
+            if not bulk_selected:
+                st.error("Please select at least one participant to proceed.")
+            else:
+                # parse ids
+                ids = []
+                for s in bulk_selected:
+                    try:
+                        pid = int(s.split("|",1)[0].strip())
+                        ids.append(pid)
+                    except Exception:
+                        continue
+                if not ids:
+                    st.error("No valid participant IDs selected.")
+                else:
+                    try:
+                        with db_transaction() as conn:
+                            if action_choice.startswith("Move"):
+                                # update participants session_id
+                                if target_session_id is None:
+                                    tgt = None
+                                else:
+                                    tgt = target_session_id
+                                q = "UPDATE participants SET session_id=? WHERE id=?"
+                                for pid in ids:
+                                    conn.execute(q, (tgt, pid))
+                                log_action(current_username, "bulk_move", json.dumps({"ids":ids,"target":target_session_id}))
+                                st.success(f"Moved {len(ids)} participant(s).")
+                            else:
+                                # Copy: duplicate participant rows (including photo copy)
+                                copied = 0
+                                for pid in ids:
+                                    cur = conn.cursor()
+                                    cur.execute("SELECT * FROM participants WHERE id=?", (pid,))
+                                    prow = cur.fetchone()
+                                    if prow:
+                                        new_id = duplicate_participant_row(conn, prow, target_session_id, current_username, active)
+                                        if new_id:
+                                            copied += 1
+                                log_action(current_username, "bulk_copy", json.dumps({"ids":ids,"target":target_session_id,"copied":copied}))
+                                st.success(f"Copied {copied} participant(s).")
+                        safe_rerun()
+                    except Exception as e:
+                        st.error(f"Bulk action failed: {e}")
+
+        # --- Add new participant form ---
         with st.expander("➕ Add New Participant"):
             with st.form("add_participant"):
                 number = st.text_input("Number")
@@ -1688,7 +1759,7 @@ else:
                 st.error(f"Unable to generate Word file: {e}")
 
         # ------------------------
-        # Admin dashboard + backup & restore UI
+        # Admin dashboard + backup & restore UI (unchanged)
         # ------------------------
         if role == "Admin":
             st.header("👑 Admin Dashboard")
@@ -1777,9 +1848,7 @@ else:
                                     results.append(("media", False, msg2))
                             if not uploaded_db and not uploaded_media:
                                 st.info("No files uploaded.")
-                            # log action
                             log_action(current_username, "restore_attempt", json.dumps(results))
-                            # refresh UI
                             safe_rerun()
 
             # Standard Admin user management below

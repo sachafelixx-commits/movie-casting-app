@@ -1539,6 +1539,62 @@ else:
         # Admin dashboard (unchanged)
         if role == "Admin":
             st.header("👑 Admin Dashboard")
+
+            # -- Migration / Backup tools for admins --
+            with st.expander("🔧 Database Migration & Backup (Admin)", expanded=False):
+                st.write("Use this to create a safe backup of the database and apply schema migrations. Recommended before major upgrades.")
+                colb, cole = st.columns([2,3])
+                make_backup = colb.checkbox("Create backup before migrating", value=True)
+                show_backups = cole.checkbox("Show existing backups", value=False)
+
+                if show_backups:
+                    try:
+                        bdir = "backups"
+                        os.makedirs(bdir, exist_ok=True)
+                        files = sorted([f for f in os.listdir(bdir) if os.path.isfile(os.path.join(bdir,f))], reverse=True)
+                        if not files:
+                            st.info("No backups found.")
+                        else:
+                            for f in files[:20]:
+                                st.markdown(f"- `{f}`")
+                    except Exception as e:
+                        st.error(f"Unable to list backups: {e}")
+
+                if st.button("Run DB Backup & Migration", key="run_migration_btn"):
+                    backup_path = None
+                    # create backups dir
+                    try:
+                        os.makedirs("backups", exist_ok=True)
+                    except Exception:
+                        pass
+
+                    if make_backup:
+                        try:
+                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            backup_path = os.path.join("backups", f"data.db.backup.{ts}.sqlite")
+                            # copy DB file if exists
+                            if os.path.exists(DB_FILE):
+                                shutil.copy2(DB_FILE, backup_path)
+                                st.success(f"Backup created: {backup_path}")
+                            else:
+                                st.warning("No DB file found to back up.")
+                                backup_path = None
+                        except Exception as e:
+                            st.error(f"Backup failed: {e}")
+                            backup_path = None
+
+                    # run migration steps (ensure schema + migrate from users.json)
+                    try:
+                        ensure_schema()
+                        migrate_from_json_if_needed()
+                        st.success("Schema migration completed (ensure_schema + migrate_from_json_if_needed).")
+                        log_action(current_username, "run_migration", f"backup={backup_path}")
+                        # refresh UI to pick up any schema changes
+                        safe_rerun()
+                    except Exception as e:
+                        st.error(f"Migration failed: {e}")
+
+            # -- End migration tools --
             if st.button("🔄 Refresh Users"):
                 safe_rerun()
 
@@ -1619,3 +1675,4 @@ else:
                             safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to delete user: {e}")
+

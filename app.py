@@ -79,30 +79,7 @@ st.markdown("""
   gap:12px;
   align-items:flex-start;
   margin-bottom: 10px;
-}
 
-/* Remove large top gap that Streamlit sometimes inserts via header */
-.css-18e3th9 { padding-top: 0.5rem; }
-
-/* Responsive */
-@media (max-width: 900px) {
-  .participant-letterbox .photo { height: 160px; }
-}
-@media (max-width: 600px) {
-  .participant-letterbox { max-width: 100%; padding: 6px; }
-  .participant-letterbox .photo { height: 140px; }
-  .part-row { flex-direction: column; }
-}
-
-/* Buttons slightly larger for touch */
-.stButton>button, button {
-  padding: .55rem .9rem !important;
-  font-size: 0.98rem !important;
-}
-
-/* Small helper to hide Streamlit's footer shortcuts (if present) */
-footer, .stApp > footer { display: none !important; }
-</style>
 """, unsafe_allow_html=True)
 
 # ========================

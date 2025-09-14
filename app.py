@@ -1,4 +1,4 @@
-# sachas_casting_manager_sqlite_sessions_ui_feedback.py
+# sachas_casting_manager_sqlite_sessions_ui_feedback_clean.py
 import streamlit as st
 import sqlite3
 import json
@@ -33,10 +33,10 @@ PRAGMA_WAL = "WAL"
 PRAGMA_SYNCHRONOUS = "NORMAL"
 
 # ========================
-# Inject UI CSS for letter-box participant cards + project/session highlights
+# Inject UI CSS (hidden) so it doesn't render as page text
+# Using components.v1.html with height=0 prevents the CSS from appearing.
 # ========================
-st.markdown("""
-<meta name="viewport" content="width=device-width, initial-scale=1">
+_css = r"""
 <style>
 /* Toolbar */
 .toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
@@ -131,7 +131,13 @@ st.markdown("""
 /* Slight protection against weird theme color inheritance */
 .stMarkdown p, .stMarkdown div { color: inherit !important; }
 </style>
-""", unsafe_allow_html=True)
+"""
+# inject but keep hidden height to prevent display of the css as markdown
+try:
+    st.components.v1.html(_css, height=0)
+except Exception:
+    # fallback to markdown if components missing (shouldn't happen)
+    st.markdown(_css, unsafe_allow_html=True)
 
 # ========================
 # Utilities
@@ -204,7 +210,7 @@ def get_db_conn():
     return conn
 
 # ========================
-# Image caching helpers
+# Image helpers & caching
 # ========================
 @st.cache_data(show_spinner=False)
 def image_b64_for_path(path):
@@ -241,10 +247,6 @@ def thumb_path_for(photo_path):
         return photo_path
     return None
 
-# ========================
-# save uploaded file bytes to media/<username>/<project>/<uuid>.<ext>
-# (creates thumbnail)
-# ========================
 def save_photo_file(uploaded_file, username: str, project_name: str, make_thumb=True, thumb_size=(400, 400)) -> str:
     if not uploaded_file:
         return None
@@ -278,7 +280,6 @@ def save_photo_file(uploaded_file, username: str, project_name: str, make_thumb=
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        # create thumbnail next to original (jpg)
         if make_thumb:
             try:
                 buf = io.BytesIO(data)
@@ -326,7 +327,6 @@ def save_photo_bytes(bytes_data: bytes, username: str, project_name: str, ext_hi
             f.write(bytes_data)
             f.flush()
             os.fsync(f.fileno())
-        # create thumbnail
         try:
             buf2 = io.BytesIO(bytes_data)
             img = Image.open(buf2)
@@ -643,7 +643,7 @@ ensure_schema_upgrades()
 migrate_from_json_if_needed()
 
 # ========================
-# Small helpers for app DB ops
+# Small helpers for app DB ops (sessions included)
 # ========================
 def get_user_by_username(conn, username):
     c = conn.cursor()
@@ -724,7 +724,6 @@ def delete_project_media(username, project_name):
     except Exception:
         pass
 
-# Session helpers
 def list_sessions_for_project(conn, project_id):
     c = conn.cursor()
     c.execute("""SELECT s.*, COALESCE(cnt.cnt,0) AS participant_count
@@ -756,7 +755,6 @@ def delete_session_and_unassign(conn, session_id):
     c.execute("UPDATE participants SET session_id=NULL WHERE session_id=?", (session_id,))
     c.execute("DELETE FROM sessions WHERE id=?", (session_id,))
 
-# Duplicate participant row helper (used for copying)
 def duplicate_participant_row(conn, prow, target_session_id, username, project_name):
     try:
         src = prow["photo_path"]
@@ -788,9 +786,6 @@ def duplicate_participant_row(conn, prow, target_session_id, username, project_n
     except Exception:
         return None
 
-# ========================
-# Word export helper function (returns BytesIO and filename)
-# ========================
 def build_word_for_participants(conn, project_id, parts_rows, project_name, session_label_for_filename):
     doc = Document()
     header = f"Participants - {project_name} - {session_label_for_filename}"
@@ -863,7 +858,7 @@ def build_word_for_participants(conn, project_id, parts_rows, project_name, sess
     return out, filename
 
 # ========================
-# UI: Auth and state init
+# UI state init
 # ========================
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
@@ -1031,10 +1026,8 @@ else:
     # Top badges to show active project/session
     st.title("🎬 Sacha's Casting Manager")
     badge_html = "<div style='margin-bottom:10px'>"
-    # project badge
     proj_badge_class = "badge active" if active else "badge"
     badge_html += f"<span class='{proj_badge_class}'>Project: {active}</span>"
-    # session badge (if set)
     cur_sf = st.session_state.get("current_session_filter", "All")
     if cur_sf == "All":
         badge_html += "<span class='badge'>Session: All</span>"
@@ -1087,15 +1080,13 @@ else:
                 except Exception:
                     pass
                 st.success("✅ Thanks for checking in!")
-                # user-controlled continue button so they see the success message
                 if st.button("Continue", key=f"participant_continue_{int(time.time())}"):
                     st.session_state["participants_offset"] = 0
                     safe_rerun()
 
     # Casting manager mode
     else:
-        # Toolbar
-        st.markdown("<div class='toolbar'></div>", unsafe_allow_html=True)
+        # top toolbar buttons (kept but no empty placeholder)
         tcols = st.columns([1,1,1,1,1])
         if tcols[0].button("➕ New Project"):
             st.session_state["open_new_project"] = True
@@ -1123,7 +1114,7 @@ else:
         with pm_col2:
             sort_opt = st.selectbox("Sort by", ["Name A→Z", "Newest", "Oldest", "Most Participants", "Fewest Participants"], index=0)
 
-        # Create project (now with Continue button)
+        # Create project
         with st.expander("➕ Create New Project", expanded=st.session_state.get("open_new_project", False)):
             with st.form("new_project_form"):
                 p_name = st.text_input("Project Name")
@@ -1142,7 +1133,6 @@ else:
                                     create_project(conn, user_id, p_name, p_desc or "")
                                     log_action(current_username, "create_project", p_name)
                                     st.success(f"Project '{p_name}' created.")
-                                    # show a controlled continue button so the message is visible
                                     if st.button("Set Active & Continue", key=f"setactive_after_create_{p_name}"):
                                         st.session_state["current_project_name"] = p_name
                                         st.session_state["open_new_project"] = False
@@ -1179,7 +1169,6 @@ else:
         for name, desc, created, count in proj_items:
             is_active = (name == st.session_state.get("current_project_name"))
             cols = st.columns([3,4,2,2,4])
-            # highlight project name column when active
             project_html = f"<span class='project-card {'active' if is_active else ''}'>{'🟢 ' if is_active else ''}<strong>{name}</strong></span>"
             cols[0].markdown(project_html, unsafe_allow_html=True)
             cols[1].markdown(desc or "—")
@@ -1284,9 +1273,7 @@ else:
 
         st.header(f"👥 Participants — {current}")
 
-        # ------------------------
         # Sessions panel (separate)
-        # ------------------------
         st.subheader("📅 Sessions (separate panel)")
         sess_col_left, sess_col_right = st.columns([3,1])
 
@@ -1295,7 +1282,6 @@ else:
             sessions_all = list_sessions_for_project(conn, project_id)
 
         with sess_col_left:
-            st.markdown("<div class='sessions-list'>", unsafe_allow_html=True)
             if st.button("View: All participants"):
                 st.session_state["current_session_filter"] = "All"
                 safe_rerun()
@@ -1329,9 +1315,8 @@ else:
                     st.session_state["export_session_pending_name"] = sname
                     st.session_state["export_session_pending_date"] = sdate
                     safe_rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
 
-        # Right: session creation + editing (with controlled Continue/View)
+        # Right: session creation + editing
         with sess_col_right:
             st.markdown("**Create session**")
             new_sess_name = st.text_input("Name", key="new_session_name_short")
@@ -1347,7 +1332,6 @@ else:
                         st.success("Session created.")
                         st.session_state["last_created_session_id"] = new_id
                         st.session_state["last_created_session_name"] = new_sess_name
-                        # controlled action: view or dismiss
                         if st.button("View session", key=f"view_after_create_sess_{new_id}"):
                             st.session_state["current_session_filter"] = new_id
                             st.session_state["open_new_session"] = False
@@ -1360,7 +1344,6 @@ else:
                     except Exception as e:
                         st.error(f"Unable to create session: {e}")
 
-            # Edit session form (if set)
             if st.session_state.get("editing_session"):
                 sid = st.session_state.get("editing_session")
                 with db_connect() as conn:
@@ -1385,7 +1368,6 @@ else:
                         st.session_state["editing_session"] = None
                         safe_rerun()
 
-            # Confirm delete session
             if st.session_state.get("confirm_delete_session"):
                 sid = st.session_state.get("confirm_delete_session")
                 with db_connect() as conn:
@@ -1410,7 +1392,7 @@ else:
                         st.session_state["confirm_delete_session"] = None
                         safe_rerun()
 
-        # If an export-session was requested, ask for confirmation and show download button
+        # Export session confirmation & download
         if st.session_state.get("export_session_pending"):
             sid = st.session_state.get("export_session_pending")
             sname = st.session_state.get("export_session_pending_name", "Session")
@@ -1444,9 +1426,7 @@ else:
                 st.session_state["export_session_pending_date"] = None
                 safe_rerun()
 
-        # ------------------------
-        # View mode toggle (Letterbox / Grid)
-        # ------------------------
+        # View mode toggle
         st.markdown("**View participants as:**")
         st.session_state["view_mode"] = st.radio("View mode", ["Letterbox", "Grid"], index=0 if st.session_state.get("view_mode","Letterbox")=="Letterbox" else 1, horizontal=True)
 
@@ -1478,7 +1458,6 @@ else:
                 checked = st.session_state.get(key, False)
                 st.checkbox(f"{r['id']} | {r['name'] or 'Unnamed'}", value=checked, key=key)
 
-            # target sessions listing including Unassigned
             with db_connect() as conn:
                 sess_for_bulk = list_sessions_for_project(conn, project_id)
             session_choices_for_ui = [("Unassigned", None)] + [(s["name"], s["id"]) for s in sess_for_bulk]
@@ -1540,7 +1519,7 @@ else:
                 st.session_state["open_bulk_actions"] = False
                 safe_rerun()
 
-        # --- Add new participant form ---
+        # Add new participant form
         with st.expander("➕ Add New Participant", expanded=st.session_state.get("open_add_participant", False)):
             with st.form("add_participant"):
                 number = st.text_input("Number")
@@ -1577,7 +1556,6 @@ else:
                         except Exception:
                             pass
                         st.success("Participant added!")
-                        # Controlled continue so user sees the message
                         if st.button("Continue", key=f"add_part_continue_{int(time.time())}"):
                             st.session_state["participants_offset"] = 0
                             st.session_state["open_add_participant"] = False
@@ -1847,7 +1825,7 @@ else:
                                 st.session_state["editing_participant"] = None
                                 safe_rerun()
 
-        # Load more / first page controls
+        # pagination controls
         if offset + PAGE_SIZE < total:
             if st.button("Load more participants"):
                 st.session_state["participants_offset"] = offset + PAGE_SIZE
@@ -1857,7 +1835,7 @@ else:
                 st.session_state["participants_offset"] = 0
                 safe_rerun()
 
-        # Export to Word (session-aware) - main project button requires confirmation
+        # Export Project (confirm then download)
         st.subheader("📄 Export Participants (Word)")
         if st.session_state.get("export_project_pending", False):
             current_filter = st.session_state.get("export_project_filter", "All")

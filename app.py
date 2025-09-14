@@ -1,4 +1,4 @@
-# sachas_casting_manager_sqlite_sessions_separated.py
+# sachas_casting_manager_sqlite_sessions_export_confirm.py
 import streamlit as st
 import sqlite3
 import json
@@ -793,6 +793,96 @@ def duplicate_participant_row(conn, prow, target_session_id, username, project_n
         return None
 
 # ========================
+# Word export helper function (returns BytesIO and filename)
+# ========================
+def build_word_for_participants(conn, project_id, parts_rows, project_name, session_label_for_filename):
+    """
+    parts_rows: iterable of sqlite3.Row participants
+    session_label_for_filename: string to include in filename (sanitized)
+    returns: (BytesIO, filename)
+    """
+    doc = Document()
+    header = f"Participants - {project_name} - {session_label_for_filename}"
+    doc.add_heading(header, 0)
+
+    # If parts_rows is not a list, convert to list to iterate multiple times
+    parts = list(parts_rows)
+
+    # find session date if single session (we'll try to include the date if all participants share same session)
+    # but we may not have that info here — calling code can add session date in header when known
+
+    # Build a simple table: Photo | Number | Name | Role | Age | Agency | Availability
+    cols = ["Photo", "Number", "Name", "Role", "Age", "Agency", "Availability"]
+    table = doc.add_table(rows=1, cols=len(cols))
+    table.autofit = False
+    # set column widths (best-effort)
+    try:
+        table.columns[0].width = Inches(1.2)  # photo
+        for i in range(1, len(cols)):
+            table.columns[i].width = Inches(1.2)
+    except Exception:
+        pass
+    hdr_cells = table.rows[0].cells
+    for i, c in enumerate(cols):
+        hdr_cells[i].text = c
+
+    for p in parts:
+        row_cells = table.add_row().cells
+        # image -> try thumbnail or photo
+        display_path = thumb_path_for(safe_field(p, "photo_path", ""))
+        bytes_data = None
+        if display_path and os.path.exists(display_path):
+            try:
+                with open(display_path, "rb") as f:
+                    bytes_data = f.read()
+            except Exception:
+                bytes_data = None
+        if bytes_data is None:
+            bytes_data = get_photo_bytes(safe_field(p, "photo_path", ""))
+
+        if bytes_data:
+            try:
+                img_stream = io.BytesIO(bytes_data)
+                img_stream.seek(0)
+                paragraph = row_cells[0].paragraphs[0]
+                run = paragraph.add_run()
+                try:
+                    run.add_picture(img_stream, width=Inches(1.0))
+                except Exception:
+                    # fallback via temp file
+                    tf = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+                    try:
+                        tf.write(bytes_data)
+                        tf.flush()
+                        tf.close()
+                        run.add_picture(tf.name, width=Inches(1.0))
+                    finally:
+                        try:
+                            os.unlink(tf.name)
+                        except Exception:
+                            pass
+            except Exception:
+                row_cells[0].text = "Photo"
+        else:
+            row_cells[0].text = "No Photo"
+
+        row_cells[1].text = safe_field(p, "number", "")
+        row_cells[2].text = safe_field(p, "name", "")
+        row_cells[3].text = safe_field(p, "role", "")
+        row_cells[4].text = safe_field(p, "age", "")
+        row_cells[5].text = safe_field(p, "agency", "")
+        row_cells[6].text = safe_field(p, "availability", "")
+
+    out = io.BytesIO()
+    doc.save(out)
+    out.seek(0)
+    # sanitize filename
+    safe_proj = _sanitize_for_path(project_name)
+    safe_sess = _sanitize_for_path(session_label_for_filename)
+    filename = f"{safe_proj}_participants_{safe_sess}.docx"
+    return out, filename
+
+# ========================
 # UI: Auth and state init
 # ========================
 if "logged_in" not in st.session_state:
@@ -829,6 +919,12 @@ if "participants_offset" not in st.session_state:
     st.session_state["participants_offset"] = 0
 if "editing_participant" not in st.session_state:
     st.session_state["editing_participant"] = None
+if "export_session_pending" not in st.session_state:
+    st.session_state["export_session_pending"] = None
+if "export_project_pending" not in st.session_state:
+    st.session_state["export_project_pending"] = False
+if "export_project_filter" not in st.session_state:
+    st.session_state["export_project_filter"] = "All"
 
 if not st.session_state["logged_in"]:
     st.title("🎬 Sacha's Casting Manager")
@@ -1008,7 +1104,9 @@ else:
             st.session_state["bulk_mode"] = True
             safe_rerun()
         if tcols[4].button("📄 Export"):
-            st.session_state["open_export"] = True
+            # open project export confirmation panel
+            st.session_state["export_project_pending"] = True
+            st.session_state["export_project_filter"] = st.session_state.get("current_session_filter", "All")
             safe_rerun()
 
         # Project Manager UI
@@ -1188,7 +1286,6 @@ else:
         with sess_col_left:
             st.markdown("<div class='sessions-list'>", unsafe_allow_html=True)
             # "All participants" option
-            all_selected = st.session_state.get("current_session_filter") == "All"
             if st.button("View: All participants"):
                 st.session_state["current_session_filter"] = "All"
                 safe_rerun()
@@ -1199,14 +1296,14 @@ else:
                 scount = safe_field(s, "participant_count", 0)
                 row_html = f"""
                     <div class='session-row'>
-                        <div class='meta'><strong>{sname}</strong><div class='meta'>{sdate or ''}</div></div>
+                        <div style="min-width:140px"><strong>{sname}</strong></div>
+                        <div class='meta'>{sdate or ''}</div>
                         <div class='meta'>Participants: {scount}</div>
-                        <div class='actions'></div>
                     </div>
                 """
                 st.markdown(row_html, unsafe_allow_html=True)
-                # Buttons for each session:
-                c1, c2, c3 = st.columns([1,1,1])
+                # Buttons for each session: View / Edit / Delete / Export
+                c1, c2, c3, c4 = st.columns([1,1,1,1])
                 if c1.button("View", key=f"view_sess_{sid}"):
                     st.session_state["current_session_filter"] = sid
                     safe_rerun()
@@ -1215,6 +1312,12 @@ else:
                     safe_rerun()
                 if c3.button("Delete", key=f"del_sess_{sid}"):
                     st.session_state["confirm_delete_session"] = sid
+                    safe_rerun()
+                if c4.button("Export", key=f"export_sess_{sid}"):
+                    # set pending export session
+                    st.session_state["export_session_pending"] = sid
+                    st.session_state["export_session_pending_name"] = sname
+                    st.session_state["export_session_pending_date"] = sdate
                     safe_rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1286,6 +1389,43 @@ else:
                     if st.button("Cancel", key=f"cancel_del_sess_{sid}"):
                         st.session_state["confirm_delete_session"] = None
                         safe_rerun()
+
+        # If an export-session was requested, ask for confirmation and show download button
+        if st.session_state.get("export_session_pending"):
+            sid = st.session_state.get("export_session_pending")
+            sname = st.session_state.get("export_session_pending_name", "Session")
+            sdate = st.session_state.get("export_session_pending_date", "")
+            st.markdown("---")
+            st.info(f"You are about to export session **{sname}**{(' — ' + sdate) if sdate else ''}. Click Confirm to build the Word file.")
+            c_ok, c_cancel = st.columns([1,1])
+            if c_ok.button("Confirm export session"):
+                try:
+                    with db_connect() as conn:
+                        cur = conn.cursor()
+                        cur.execute("SELECT * FROM participants WHERE project_id=? AND session_id=? ORDER BY id", (project_id, sid))
+                        parts = cur.fetchall()
+                        if not parts:
+                            st.info("No participants in this session to export.")
+                        else:
+                            # Build doc with header including session date
+                            out_stream, filename = build_word_for_participants(conn, project_id, parts, active, f"{sname}_{sdate or 'nodate'}")
+                            # Provide the download button
+                            st.download_button(
+                                label=f"Download Word export for session '{sname}'",
+                                data=out_stream,
+                                file_name=filename,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            )
+                            log_action(current_username, "export_session", f"{sname} ({sdate})")
+                except Exception as e:
+                    st.error(f"Unable to export session: {e}")
+                # clear pending after action (user can re-trigger)
+                st.session_state["export_session_pending"] = None
+            if c_cancel.button("Cancel export"):
+                st.session_state["export_session_pending"] = None
+                st.session_state["export_session_pending_name"] = None
+                st.session_state["export_session_pending_date"] = None
+                safe_rerun()
 
         # ------------------------
         # View mode toggle (Letterbox / Grid)
@@ -1696,90 +1836,61 @@ else:
                 st.session_state["participants_offset"] = 0
                 safe_rerun()
 
-        # Export to Word
+        # Export to Word (session-aware) - main project button now requires confirmation
         st.subheader("📄 Export Participants (Word)")
-        if st.button("Download Word File of Current Project"):
-            try:
+        if st.session_state.get("export_project_pending", False):
+            current_filter = st.session_state.get("export_project_filter", "All")
+            if current_filter == "All":
+                st.info(f"You are about to export **ALL participants** for project **{active}**. Click Confirm to continue.")
+            else:
+                # try to get session name/date for confirmation
                 with db_connect() as conn:
                     cur = conn.cursor()
-                    cur.execute("SELECT * FROM participants WHERE project_id=? ORDER BY id", (project_id,))
-                    parts = cur.fetchall()
-                    if not parts:
-                        st.info("No participants in this project yet.")
-                    else:
-                        sess_map = {s['id']: s['name'] for s in list_sessions_for_project(conn, project_id)}
-                        doc = Document()
-                        doc.add_heading(f"Participants - {active}", 0)
-                        for p in parts:
-                            table = doc.add_table(rows=1, cols=2)
-                            table.autofit = False
-                            table.columns[0].width = Inches(1.7)
-                            table.columns[1].width = Inches(4.5)
-                            row_cells = table.rows[0].cells
-
-                            display_path = thumb_path_for(safe_field(p, "photo_path", ""))
-                            bytes_data = None
-                            if display_path and os.path.exists(display_path):
-                                try:
-                                    with open(display_path, "rb") as f:
-                                        bytes_data = f.read()
-                                except Exception:
-                                    bytes_data = None
-                            if bytes_data is None:
-                                bytes_data = get_photo_bytes(safe_field(p, "photo_path", ""))
-
-                            if bytes_data:
-                                try:
-                                    image_stream = io.BytesIO(bytes_data)
-                                    image_stream.seek(0)
-                                    paragraph = row_cells[0].paragraphs[0]
-                                    run = paragraph.add_run()
-                                    try:
-                                        run.add_picture(image_stream, width=Inches(1.5))
-                                    except Exception:
-                                        tf = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-                                        try:
-                                            tf.write(bytes_data)
-                                            tf.flush()
-                                            tf.close()
-                                            run.add_picture(tf.name, width=Inches(1.5))
-                                        finally:
-                                            try:
-                                                os.unlink(tf.name)
-                                            except Exception:
-                                                pass
-                                except Exception:
-                                    row_cells[0].text = "Photo Error"
-                            else:
-                                row_cells[0].text = "No Photo"
-
-                            session_name = sess_map.get(p["session_id"], "Unassigned")
-                            info_text = (
-                                f"Number: {safe_field(p, 'number','')}\n"
-                                f"Name: {safe_field(p, 'name','')}\n"
-                                f"Session: {session_name}\n"
-                                f"Role: {safe_field(p, 'role','')}\n"
-                                f"Age: {safe_field(p, 'age','')}\n"
-                                f"Agency: {safe_field(p, 'agency','')}\n"
-                                f"Height: {safe_field(p, 'height','')}\n"
-                                f"Waist: {safe_field(p, 'waist','')}\n"
-                                f"Dress/Suit: {safe_field(p, 'dress_suit','')}\n"
-                                f"Next Available: {safe_field(p, 'availability','')}"
+                    cur.execute("SELECT name, date FROM sessions WHERE id=?", (current_filter,))
+                    r = cur.fetchone()
+                sname = r["name"] if r else f"session_{current_filter}"
+                sdate = r["date"] if r else ""
+                st.info(f"You are about to export session **{sname}**{(' — ' + sdate) if sdate else ''} for project **{active}**. Click Confirm to continue.")
+            c_ok, c_cancel = st.columns([1,1])
+            if c_ok.button("Confirm export project"):
+                try:
+                    with db_connect() as conn:
+                        cur = conn.cursor()
+                        cf = st.session_state.get("export_project_filter", "All")
+                        if cf == "All":
+                            cur.execute("SELECT * FROM participants WHERE project_id=? ORDER BY id", (project_id,))
+                            parts = cur.fetchall()
+                            sess_label_for_file = "all"
+                        else:
+                            cur.execute("SELECT * FROM participants WHERE project_id=? AND session_id=? ORDER BY id", (project_id, cf))
+                            parts = cur.fetchall()
+                            cur.execute("SELECT name, date FROM sessions WHERE id=?", (cf,))
+                            rr = cur.fetchone()
+                            sess_label_for_file = f"{(rr['name'] if rr else 'session')}_{(rr['date'] or '')}"
+                        if not parts:
+                            st.info("No participants found to export for this selection.")
+                        else:
+                            out_stream, filename = build_word_for_participants(conn, project_id, parts, active, sess_label_for_file)
+                            st.download_button(
+                                label="Download Word file for selection",
+                                data=out_stream,
+                                file_name=filename,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                             )
-                            row_cells[1].text = info_text
-                            doc.add_paragraph("\n")
-
-                        word_stream = io.BytesIO()
-                        doc.save(word_stream)
-                        word_stream.seek(0)
-                        st.download_button(
-                            label="Click to download Word file",
-                            data=word_stream,
-                            file_name=f"{current}_participants.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                        )
-            except Exception as e:
-                st.error(f"Unable to generate Word file: {e}")
+                            log_action(current_username, "export_project", f"{active} / {sess_label_for_file}")
+                except Exception as e:
+                    st.error(f"Unable to generate Word file: {e}")
+                st.session_state["export_project_pending"] = False
+            if c_cancel.button("Cancel export project"):
+                st.session_state["export_project_pending"] = False
+                st.session_state["export_project_filter"] = "All"
+                safe_rerun()
+        else:
+            if st.button("Download Word File of Current Project"):
+                # open the confirm panel next loop
+                st.session_state["export_project_pending"] = True
+                st.session_state["export_project_filter"] = st.session_state.get("current_session_filter","All")
+                safe_rerun()
 
         # Admin dashboard (unchanged)
         if role == "Admin":

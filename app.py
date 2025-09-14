@@ -1,4 +1,4 @@
-# sachas_casting_manager_sqlite_sessions_ui_feedback_clean.py
+# sachas_casting_manager_sqlite_sessions_ui_feedback_clean_nobanner.py
 import streamlit as st
 import sqlite3
 import json
@@ -34,13 +34,19 @@ PRAGMA_SYNCHRONOUS = "NORMAL"
 
 # ========================
 # Inject UI CSS (hidden) so it doesn't render as page text
-# Using components.v1.html with height=0 prevents the CSS from appearing.
+# Also reduces top spacing and removes the toolbar gap.
 # ========================
 _css = r"""
 <style>
-/* Toolbar */
-.toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
-.toolbar .stButton>button { padding: .7rem 1rem !important; font-size: 1rem !important; border-radius: 0.6rem; }
+/* Reduce top gap and title spacing */
+main[data-testid="stAppViewContainer"] > div:first-child, .main > div:first-child {
+  padding-top: 6px !important;
+  margin-top: 0 !important;
+}
+h1, h2, h3 { margin-top: 6px !important; }
+
+/* Toolbar removed — any placeholder spacing kept minimal */
+.toolbar { display:none !important; }
 
 /* Badge */
 .badge { display:inline-block; padding:6px 10px; border-radius:999px; background:#f3f4f6; margin-right:8px; font-weight:600; color:#0f172a; }
@@ -132,11 +138,9 @@ _css = r"""
 .stMarkdown p, .stMarkdown div { color: inherit !important; }
 </style>
 """
-# inject but keep hidden height to prevent display of the css as markdown
 try:
     st.components.v1.html(_css, height=0)
 except Exception:
-    # fallback to markdown if components missing (shouldn't happen)
     st.markdown(_css, unsafe_allow_html=True)
 
 # ========================
@@ -1023,9 +1027,9 @@ else:
 
     active = st.session_state["current_project_name"]
 
-    # Top badges to show active project/session
+    # Top badges to show active project/session (keeps top compact)
     st.title("🎬 Sacha's Casting Manager")
-    badge_html = "<div style='margin-bottom:10px'>"
+    badge_html = "<div style='margin-bottom:6px'>"
     proj_badge_class = "badge active" if active else "badge"
     badge_html += f"<span class='{proj_badge_class}'>Project: {active}</span>"
     cur_sf = st.session_state.get("current_session_filter", "All")
@@ -1086,27 +1090,7 @@ else:
 
     # Casting manager mode
     else:
-        # top toolbar buttons (kept but no empty placeholder)
-        tcols = st.columns([1,1,1,1,1])
-        if tcols[0].button("➕ New Project"):
-            st.session_state["open_new_project"] = True
-            safe_rerun()
-        if tcols[1].button("➕ New Participant"):
-            st.session_state["open_add_participant"] = True
-            safe_rerun()
-        if tcols[2].button("📅 New Session"):
-            st.session_state["open_new_session"] = True
-            safe_rerun()
-        if tcols[3].button("🔀 Bulk Actions"):
-            st.session_state["open_bulk_actions"] = True
-            st.session_state["bulk_mode"] = True
-            safe_rerun()
-        if tcols[4].button("📄 Export"):
-            st.session_state["export_project_pending"] = True
-            st.session_state["export_project_filter"] = st.session_state.get("current_session_filter", "All")
-            safe_rerun()
-
-        # Project Manager UI
+        # Project Manager UI (no top toolbar buttons here — removed per request)
         st.header("📁 Project Manager")
         pm_col1, pm_col2 = st.columns([3,2])
         with pm_col1:

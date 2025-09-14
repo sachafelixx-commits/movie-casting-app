@@ -1,4 +1,4 @@
-# sachas_casting_manager_sqlite_sessions_export_confirm.py
+# sachas_casting_manager_sqlite_sessions_ui_feedback.py
 import streamlit as st
 import sqlite3
 import json
@@ -33,7 +33,7 @@ PRAGMA_WAL = "WAL"
 PRAGMA_SYNCHRONOUS = "NORMAL"
 
 # ========================
-# Inject UI CSS for letter-box participant cards + grid + toolbar
+# Inject UI CSS for letter-box participant cards + project/session highlights
 # ========================
 st.markdown("""
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -41,6 +41,10 @@ st.markdown("""
 /* Toolbar */
 .toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
 .toolbar .stButton>button { padding: .7rem 1rem !important; font-size: 1rem !important; border-radius: 0.6rem; }
+
+/* Badge */
+.badge { display:inline-block; padding:6px 10px; border-radius:999px; background:#f3f4f6; margin-right:8px; font-weight:600; color:#0f172a; }
+.badge.active { background:#16a34a; color:white; box-shadow: 0 1px 6px rgba(16,185,129,0.12); }
 
 /* Participant letter-box card */
 .participant-letterbox {
@@ -88,17 +92,6 @@ st.markdown("""
   font-size: 0.9rem;
 }
 
-/* Checkbox overlay for bulk select (when enabled) */
-.participant-letterbox .bulk-check {
-  position: absolute;
-  top: 10px;
-  left: 10px;
-  z-index: 20;
-  background: rgba(255,255,255,0.8);
-  padding: 4px;
-  border-radius: 6px;
-}
-
 /* Grid card */
 .grid-card {
   border-radius:8px;
@@ -116,8 +109,13 @@ st.markdown("""
 /* Sessions list */
 .sessions-list { display:flex; flex-direction:column; gap:8px; }
 .session-row { display:flex; gap:8px; align-items:center; padding:8px; border-radius:8px; background:#fff; border:1px solid rgba(0,0,0,0.03); }
+.session-row.active { background: rgba(56, 193, 75, 0.06); border:1px solid rgba(56,193,75,0.12); }
 .session-row .meta { color:rgba(0,0,0,0.6); font-size:0.9rem; }
 .session-row .actions { margin-left:auto; display:flex; gap:6px; }
+
+/* Project card in list */
+.project-card { padding:6px 8px; border-radius:8px; display:inline-block; }
+.project-card.active { background: rgba(56, 193, 75, 0.06); border-radius:8px; padding:6px 8px; border:1px solid rgba(56,193,75,0.12); }
 
 /* Responsive */
 @media (max-width: 900px) {
@@ -245,6 +243,7 @@ def thumb_path_for(photo_path):
 
 # ========================
 # save uploaded file bytes to media/<username>/<project>/<uuid>.<ext>
+# (creates thumbnail)
 # ========================
 def save_photo_file(uploaded_file, username: str, project_name: str, make_thumb=True, thumb_size=(400, 400)) -> str:
     if not uploaded_file:
@@ -347,7 +346,6 @@ def remove_media_file(path: str):
             return
         if isinstance(path, str) and os.path.exists(path) and os.path.commonpath([os.path.abspath(path), os.path.abspath(MEDIA_DIR)]) == os.path.abspath(MEDIA_DIR):
             os.remove(path)
-            # also try removing thumbnail if exists
             base, _ = os.path.splitext(path)
             thumb = f"{base}_thumb.jpg"
             try:
@@ -355,7 +353,6 @@ def remove_media_file(path: str):
                     os.remove(thumb)
             except Exception:
                 pass
-            # cleanup empty dirs up to MEDIA_DIR
             parent = os.path.dirname(path)
             while parent and os.path.abspath(parent) != os.path.abspath(MEDIA_DIR):
                 try:
@@ -755,7 +752,6 @@ def rename_session(conn, session_id, new_name, new_date=None):
     c.execute("UPDATE sessions SET name=?, date=? WHERE id=?", (new_name, new_date, session_id))
 
 def delete_session_and_unassign(conn, session_id):
-    """Delete session and set session_id NULL on associated participants."""
     c = conn.cursor()
     c.execute("UPDATE participants SET session_id=NULL WHERE session_id=?", (session_id,))
     c.execute("DELETE FROM sessions WHERE id=?", (session_id,))
@@ -796,28 +792,15 @@ def duplicate_participant_row(conn, prow, target_session_id, username, project_n
 # Word export helper function (returns BytesIO and filename)
 # ========================
 def build_word_for_participants(conn, project_id, parts_rows, project_name, session_label_for_filename):
-    """
-    parts_rows: iterable of sqlite3.Row participants
-    session_label_for_filename: string to include in filename (sanitized)
-    returns: (BytesIO, filename)
-    """
     doc = Document()
     header = f"Participants - {project_name} - {session_label_for_filename}"
     doc.add_heading(header, 0)
-
-    # If parts_rows is not a list, convert to list to iterate multiple times
     parts = list(parts_rows)
-
-    # find session date if single session (we'll try to include the date if all participants share same session)
-    # but we may not have that info here — calling code can add session date in header when known
-
-    # Build a simple table: Photo | Number | Name | Role | Age | Agency | Availability
     cols = ["Photo", "Number", "Name", "Role", "Age", "Agency", "Availability"]
     table = doc.add_table(rows=1, cols=len(cols))
     table.autofit = False
-    # set column widths (best-effort)
     try:
-        table.columns[0].width = Inches(1.2)  # photo
+        table.columns[0].width = Inches(1.2)
         for i in range(1, len(cols)):
             table.columns[i].width = Inches(1.2)
     except Exception:
@@ -828,7 +811,6 @@ def build_word_for_participants(conn, project_id, parts_rows, project_name, sess
 
     for p in parts:
         row_cells = table.add_row().cells
-        # image -> try thumbnail or photo
         display_path = thumb_path_for(safe_field(p, "photo_path", ""))
         bytes_data = None
         if display_path and os.path.exists(display_path):
@@ -849,7 +831,6 @@ def build_word_for_participants(conn, project_id, parts_rows, project_name, sess
                 try:
                     run.add_picture(img_stream, width=Inches(1.0))
                 except Exception:
-                    # fallback via temp file
                     tf = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
                     try:
                         tf.write(bytes_data)
@@ -876,7 +857,6 @@ def build_word_for_participants(conn, project_id, parts_rows, project_name, sess
     out = io.BytesIO()
     doc.save(out)
     out.seek(0)
-    # sanitize filename
     safe_proj = _sanitize_for_path(project_name)
     safe_sess = _sanitize_for_path(session_label_for_filename)
     filename = f"{safe_proj}_participants_{safe_sess}.docx"
@@ -892,7 +872,7 @@ if "current_user" not in st.session_state:
 if "current_project_name" not in st.session_state:
     st.session_state["current_project_name"] = None
 if "current_session_filter" not in st.session_state:
-    st.session_state["current_session_filter"] = "All"  # "All" or session_id (int)
+    st.session_state["current_session_filter"] = "All"
 if "participant_mode" not in st.session_state:
     st.session_state["participant_mode"] = False
 if "editing_project" not in st.session_state:
@@ -925,7 +905,14 @@ if "export_project_pending" not in st.session_state:
     st.session_state["export_project_pending"] = False
 if "export_project_filter" not in st.session_state:
     st.session_state["export_project_filter"] = "All"
+if "last_created_session_id" not in st.session_state:
+    st.session_state["last_created_session_id"] = None
+if "last_created_session_name" not in st.session_state:
+    st.session_state["last_created_session_name"] = None
 
+# ========================
+# Auth UI
+# ========================
 if not st.session_state["logged_in"]:
     st.title("🎬 Sacha's Casting Manager")
     choice = st.radio("Choose an option", ["Login", "Sign Up"], horizontal=True)
@@ -989,7 +976,7 @@ if not st.session_state["logged_in"]:
                     st.error(f"Unable to create account: {e}")
 
 # ========================
-# After login: main app
+# Main app after login
 # ========================
 else:
     current_username = st.session_state["current_user"]
@@ -1040,13 +1027,33 @@ else:
         st.session_state["current_project_name"] = project_names[0] if project_names else DEFAULT_PROJECT_NAME
 
     active = st.session_state["current_project_name"]
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Active Project")
-    st.sidebar.write(f"**{active}**")
+
+    # Top badges to show active project/session
+    st.title("🎬 Sacha's Casting Manager")
+    badge_html = "<div style='margin-bottom:10px'>"
+    # project badge
+    proj_badge_class = "badge active" if active else "badge"
+    badge_html += f"<span class='{proj_badge_class}'>Project: {active}</span>"
+    # session badge (if set)
+    cur_sf = st.session_state.get("current_session_filter", "All")
+    if cur_sf == "All":
+        badge_html += "<span class='badge'>Session: All</span>"
+    else:
+        try:
+            with db_connect() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT name, date FROM sessions WHERE id=?", (cur_sf,))
+                r = cur.fetchone()
+            sname = r["name"] if r else "Session"
+            sdate = r["date"] if r else ""
+            badge_html += f"<span class='badge active'>Session: {sname}{(' — ' + sdate) if sdate else ''}</span>"
+        except Exception:
+            badge_html += "<span class='badge'>Session: (unknown)</span>"
+    badge_html += "</div>"
+    st.markdown(badge_html, unsafe_allow_html=True)
 
     # Participant kiosk
     if st.session_state["participant_mode"]:
-        st.title("👋 Casting Check-In")
         st.caption("Fill in your details. Submissions go to the active project.")
         st.info(f"Submitting to project: **{active}**")
         with st.form("participant_form"):
@@ -1079,14 +1086,14 @@ else:
                     image_b64_for_path.clear()
                 except Exception:
                     pass
-                st.session_state["participants_offset"] = 0
                 st.success("✅ Thanks for checking in!")
-                safe_rerun()
+                # user-controlled continue button so they see the success message
+                if st.button("Continue", key=f"participant_continue_{int(time.time())}"):
+                    st.session_state["participants_offset"] = 0
+                    safe_rerun()
 
     # Casting manager mode
     else:
-        st.title("🎬 Sacha's Casting Manager")
-
         # Toolbar
         st.markdown("<div class='toolbar'></div>", unsafe_allow_html=True)
         tcols = st.columns([1,1,1,1,1])
@@ -1104,7 +1111,6 @@ else:
             st.session_state["bulk_mode"] = True
             safe_rerun()
         if tcols[4].button("📄 Export"):
-            # open project export confirmation panel
             st.session_state["export_project_pending"] = True
             st.session_state["export_project_filter"] = st.session_state.get("current_session_filter", "All")
             safe_rerun()
@@ -1117,7 +1123,7 @@ else:
         with pm_col2:
             sort_opt = st.selectbox("Sort by", ["Name A→Z", "Newest", "Oldest", "Most Participants", "Fewest Participants"], index=0)
 
-        # Create project
+        # Create project (now with Continue button)
         with st.expander("➕ Create New Project", expanded=st.session_state.get("open_new_project", False)):
             with st.form("new_project_form"):
                 p_name = st.text_input("Project Name")
@@ -1136,8 +1142,11 @@ else:
                                     create_project(conn, user_id, p_name, p_desc or "")
                                     log_action(current_username, "create_project", p_name)
                                     st.success(f"Project '{p_name}' created.")
-                                    st.session_state["current_project_name"] = p_name
-                                    st.session_state["open_new_project"] = False
+                                    # show a controlled continue button so the message is visible
+                                    if st.button("Set Active & Continue", key=f"setactive_after_create_{p_name}"):
+                                        st.session_state["current_project_name"] = p_name
+                                        st.session_state["open_new_project"] = False
+                                        safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to create project: {e}")
 
@@ -1170,7 +1179,9 @@ else:
         for name, desc, created, count in proj_items:
             is_active = (name == st.session_state.get("current_project_name"))
             cols = st.columns([3,4,2,2,4])
-            cols[0].markdown(f"{'🟢 ' if is_active else ''}**{name}**")
+            # highlight project name column when active
+            project_html = f"<span class='project-card {'active' if is_active else ''}'>{'🟢 ' if is_active else ''}<strong>{name}</strong></span>"
+            cols[0].markdown(project_html, unsafe_allow_html=True)
             cols[1].markdown(desc or "—")
             cols[2].markdown((created or "").split("T")[0])
             cols[3].markdown(str(count))
@@ -1285,7 +1296,6 @@ else:
 
         with sess_col_left:
             st.markdown("<div class='sessions-list'>", unsafe_allow_html=True)
-            # "All participants" option
             if st.button("View: All participants"):
                 st.session_state["current_session_filter"] = "All"
                 safe_rerun()
@@ -1294,15 +1304,16 @@ else:
                 sname = s["name"]
                 sdate = s["date"] or ""
                 scount = safe_field(s, "participant_count", 0)
+                is_s_active = (st.session_state.get("current_session_filter") == sid)
+                row_class = "session-row active" if is_s_active else "session-row"
                 row_html = f"""
-                    <div class='session-row'>
+                    <div class='{row_class}' style='display:flex;gap:8px;align-items:center;padding:8px;border-radius:8px;'>
                         <div style="min-width:140px"><strong>{sname}</strong></div>
                         <div class='meta'>{sdate or ''}</div>
                         <div class='meta'>Participants: {scount}</div>
                     </div>
                 """
                 st.markdown(row_html, unsafe_allow_html=True)
-                # Buttons for each session: View / Edit / Delete / Export
                 c1, c2, c3, c4 = st.columns([1,1,1,1])
                 if c1.button("View", key=f"view_sess_{sid}"):
                     st.session_state["current_session_filter"] = sid
@@ -1314,14 +1325,13 @@ else:
                     st.session_state["confirm_delete_session"] = sid
                     safe_rerun()
                 if c4.button("Export", key=f"export_sess_{sid}"):
-                    # set pending export session
                     st.session_state["export_session_pending"] = sid
                     st.session_state["export_session_pending_name"] = sname
                     st.session_state["export_session_pending_date"] = sdate
                     safe_rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # Right: session creation + editing
+        # Right: session creation + editing (with controlled Continue/View)
         with sess_col_right:
             st.markdown("**Create session**")
             new_sess_name = st.text_input("Name", key="new_session_name_short")
@@ -1332,10 +1342,21 @@ else:
                 else:
                     try:
                         with db_transaction() as conn:
-                            create_session(conn, project_id, new_sess_name, new_sess_date or None)
+                            new_id = create_session(conn, project_id, new_sess_name, new_sess_date or None)
                             log_action(current_username, "create_session", new_sess_name)
                         st.success("Session created.")
-                        safe_rerun()
+                        st.session_state["last_created_session_id"] = new_id
+                        st.session_state["last_created_session_name"] = new_sess_name
+                        # controlled action: view or dismiss
+                        if st.button("View session", key=f"view_after_create_sess_{new_id}"):
+                            st.session_state["current_session_filter"] = new_id
+                            st.session_state["open_new_session"] = False
+                            safe_rerun()
+                        if st.button("Dismiss", key=f"dismiss_new_sess_{new_id}"):
+                            st.session_state["last_created_session_id"] = None
+                            st.session_state["last_created_session_name"] = None
+                            st.session_state["open_new_session"] = False
+                            safe_rerun()
                     except Exception as e:
                         st.error(f"Unable to create session: {e}")
 
@@ -1380,7 +1401,6 @@ else:
                                 log_action(current_username, "delete_session", srow["name"])
                             st.success("Session deleted and participants unassigned.")
                             st.session_state["confirm_delete_session"] = None
-                            # if the deleted session was currently filtering view, reset to All
                             if st.session_state.get("current_session_filter") == sid:
                                 st.session_state["current_session_filter"] = "All"
                             safe_rerun()
@@ -1407,9 +1427,7 @@ else:
                         if not parts:
                             st.info("No participants in this session to export.")
                         else:
-                            # Build doc with header including session date
                             out_stream, filename = build_word_for_participants(conn, project_id, parts, active, f"{sname}_{sdate or 'nodate'}")
-                            # Provide the download button
                             st.download_button(
                                 label=f"Download Word export for session '{sname}'",
                                 data=out_stream,
@@ -1419,7 +1437,6 @@ else:
                             log_action(current_username, "export_session", f"{sname} ({sdate})")
                 except Exception as e:
                     st.error(f"Unable to export session: {e}")
-                # clear pending after action (user can re-trigger)
                 st.session_state["export_session_pending"] = None
             if c_cancel.button("Cancel export"):
                 st.session_state["export_session_pending"] = None
@@ -1559,10 +1576,12 @@ else:
                             image_b64_for_path.clear()
                         except Exception:
                             pass
-                        st.session_state["participants_offset"] = 0
-                        st.session_state["open_add_participant"] = False
                         st.success("Participant added!")
-                        safe_rerun()
+                        # Controlled continue so user sees the message
+                        if st.button("Continue", key=f"add_part_continue_{int(time.time())}"):
+                            st.session_state["participants_offset"] = 0
+                            st.session_state["open_add_participant"] = False
+                            safe_rerun()
                     except Exception as e:
                         st.error(f"Unable to add participant: {e}")
 
@@ -1708,8 +1727,9 @@ else:
                                         pass
                                     st.session_state["participants_offset"] = 0
                                     st.success("Participant updated!")
-                                    st.session_state["editing_participant"] = None
-                                    safe_rerun()
+                                    if st.button("Continue", key=f"edit_part_cont_{pid}"):
+                                        st.session_state["editing_participant"] = None
+                                        safe_rerun()
                                 except Exception as e:
                                     st.error(f"Unable to save participant edits: {e}")
                             if cancel_edit:
@@ -1818,8 +1838,9 @@ else:
                                         pass
                                     st.session_state["participants_offset"] = 0
                                     st.success("Participant updated!")
-                                    st.session_state["editing_participant"] = None
-                                    safe_rerun()
+                                    if st.button("Continue", key=f"grid_edit_cont_{pid}"):
+                                        st.session_state["editing_participant"] = None
+                                        safe_rerun()
                                 except Exception as e:
                                     st.error(f"Unable to save participant edits: {e}")
                             if cancel_edit:
@@ -1836,14 +1857,13 @@ else:
                 st.session_state["participants_offset"] = 0
                 safe_rerun()
 
-        # Export to Word (session-aware) - main project button now requires confirmation
+        # Export to Word (session-aware) - main project button requires confirmation
         st.subheader("📄 Export Participants (Word)")
         if st.session_state.get("export_project_pending", False):
             current_filter = st.session_state.get("export_project_filter", "All")
             if current_filter == "All":
                 st.info(f"You are about to export **ALL participants** for project **{active}**. Click Confirm to continue.")
             else:
-                # try to get session name/date for confirmation
                 with db_connect() as conn:
                     cur = conn.cursor()
                     cur.execute("SELECT name, date FROM sessions WHERE id=?", (current_filter,))
@@ -1887,7 +1907,6 @@ else:
                 safe_rerun()
         else:
             if st.button("Download Word File of Current Project"):
-                # open the confirm panel next loop
                 st.session_state["export_project_pending"] = True
                 st.session_state["export_project_filter"] = st.session_state.get("current_session_filter","All")
                 safe_rerun()

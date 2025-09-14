@@ -1,4 +1,4 @@
-# sachas_casting_manager_sqlite_fixed_signup_ui_revamp.py
+# sachas_casting_manager_sqlite_fixed_signup_ui_revamp_migrations.py
 import streamlit as st
 import sqlite3
 import json
@@ -202,8 +202,6 @@ def get_db_conn():
         cur = conn.cursor()
         cur.execute("PRAGMA journal_mode = WAL;")
         cur.execute(f"PRAGMA synchronous = {PRAGMA_SYNCHRONOUS};")
-        # optional: tune cache size if you have memory
-        # cur.execute("PRAGMA cache_size = -20000;")
     except Exception:
         pass
     return conn
@@ -297,7 +295,6 @@ def save_photo_file(uploaded_file, username: str, project_name: str, make_thumb=
             except Exception:
                 # ignore thumbnail errors
                 pass
-        # clear cached image for this path if needed by updating cache key indirectly (cache_data keyed by path)
         return path.replace("\\", "/")
     except Exception:
         return None
@@ -497,6 +494,57 @@ def init_db():
         conn.commit()
 
 # ------------------------
+# Schema upgrade helper (safe in-place migration)
+# ------------------------
+def ensure_schema_upgrades():
+    """
+    If the DB file exists and older tables are missing columns,
+    add the missing columns (non-destructive). This addresses:
+      - sessions.date missing
+      - participants.session_id missing
+    """
+    if not os.path.exists(DB_FILE):
+        return
+    try:
+        with db_transaction() as conn:
+            cur = conn.cursor()
+            # sessions table: ensure 'date' column exists
+            try:
+                cur.execute("PRAGMA table_info(sessions);")
+                rows = cur.fetchall()
+                cols = [r["name"] for r in rows] if rows else []
+                if "date" not in cols:
+                    try:
+                        cur.execute("ALTER TABLE sessions ADD COLUMN date TEXT;")
+                    except Exception:
+                        pass
+            except Exception:
+                # table may not exist — ignore here (init_db will create)
+                pass
+
+            # participants table: ensure 'session_id' column exists
+            try:
+                cur.execute("PRAGMA table_info(participants);")
+                rows = cur.fetchall()
+                cols = [r["name"] for r in rows] if rows else []
+                if "session_id" not in cols:
+                    try:
+                        cur.execute("ALTER TABLE participants ADD COLUMN session_id INTEGER;")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # ensure sessions index exists
+            try:
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);")
+            except Exception:
+                pass
+    except Exception:
+        # swallow migration errors to avoid failing the entire app — user should backup and inspect if needed
+        pass
+
+# ------------------------
 # log_action - needed early
 # ------------------------
 def log_action(user, action, details=""):
@@ -626,6 +674,8 @@ def migrate_from_json_if_needed():
 # Initialize DB + migrate once
 # ========================
 init_db()
+# run DB schema upgrades for older DBs
+ensure_schema_upgrades()
 migrate_from_json_if_needed()
 
 # ========================
@@ -866,7 +916,6 @@ if not st.session_state["logged_in"]:
                             st.session_state["prefill_username"] = new_user
                             # show confirmation but DO NOT rerun immediately so user sees the message
                             st.success("Account created! Please log in.")
-                            # do not call safe_rerun() here — that was hiding the success message
                 except Exception as e:
                     st.error(f"Unable to create account: {e}")
 
@@ -1022,7 +1071,6 @@ else:
                                     # set active project so later UI shows it
                                     st.session_state["current_project_name"] = p_name
                                     st.session_state["open_new_project"] = False
-                                    # NOTE: no immediate safe_rerun() here — allow the rest of the run to fetch projects and display the success message
                         except Exception as e:
                             st.error(f"Unable to create project: {e}")
 
@@ -1168,7 +1216,6 @@ else:
         with sess_col2:
             new_sess_date = st.text_input("Date (optional)", key="new_session_date")
         if st.session_state.get("open_new_session", False):
-            # if toolbar opened it, expand the visible control (we just use the regular input above)
             pass
         if st.button("Create Session"):
             if not new_sess_name:
@@ -1190,22 +1237,17 @@ else:
 
         # Bulk actions expander (now uses checkboxes + select all visible)
         with st.expander("🔀 Bulk actions (move/copy participants)", expanded=st.session_state.get("open_bulk_actions", False)):
-            # toggle bulk_mode on/off
             bulk_toggle = st.checkbox("Bulk selection mode (show checkboxes on participant cards)", value=st.session_state.get("bulk_mode", False))
             st.session_state["bulk_mode"] = bulk_toggle
 
-            # Prepare all participants for selection
             with db_connect() as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT id, name, number FROM participants WHERE project_id=? ORDER BY id", (project_id,))
                 all_parts = cur.fetchall()
 
-            # Render checkbox list for convenience (this duplicates the per-card checkboxes but gives a compact list in the bulk UI)
             st.markdown("**Select participants**")
-            # Buttons to select all visible or clear
             sel_cols = st.columns([1,1,2])
             if sel_cols[0].button("Select all"):
-                # set session_state keys for all listed participants to True
                 for r in all_parts:
                     key = f"bulk_sel_{r['id']}"
                     st.session_state[key] = True
@@ -1215,15 +1257,13 @@ else:
                     key = f"bulk_sel_{r['id']}"
                     st.session_state[key] = False
                 safe_rerun()
-            # Show compact list of checkboxes so user may pick which ones to act on
+
             for r in all_parts:
                 key = f"bulk_sel_{r['id']}"
-                # default value from session state (persist across runs)
                 checked = st.session_state.get(key, False)
-                val = st.checkbox(f"{r['id']} | {r['name'] or 'Unnamed'}", value=checked, key=key)
-                st.session_state[key] = val
+                # create checkbox with a key; DO NOT reassign st.session_state here (checkbox writes to session_state automatically)
+                st.checkbox(f"{r['id']} | {r['name'] or 'Unnamed'}", value=checked, key=key)
 
-            # Target session dropdown
             session_choices_for_ui = [("Unassigned", None)] + [(s["name"], s["id"]) for s in sessions]
             session_labels = [c[0] for c in session_choices_for_ui]
             target_label = st.selectbox("Target session", session_labels, index=0, key="bulk_target_session")
@@ -1231,7 +1271,6 @@ else:
             target_session_id = session_choices_for_ui[target_idx][1]
             action_choice = st.radio("Action", ["Move (cut)","Copy"], index=0, horizontal=True)
             if st.button("Apply bulk action"):
-                # collect selected ids from session_state keys
                 ids = []
                 for r in all_parts:
                     key = f"bulk_sel_{r['id']}"
@@ -1252,7 +1291,6 @@ else:
                                     conn.execute(q, (tgt, pid))
                                 log_action(current_username, "bulk_move", json.dumps({"ids":ids,"target":target_session_id}))
                                 st.success(f"Moved {len(ids)} participant(s).")
-                                # clear thumbnails cache
                                 try:
                                     image_b64_for_path.clear()
                                 except Exception:
@@ -1280,7 +1318,6 @@ else:
                         st.error(f"Bulk action failed: {e}")
 
             if st.button("Exit bulk mode"):
-                # clear all per-item keys
                 for r in all_parts:
                     key = f"bulk_sel_{r['id']}"
                     if key in st.session_state:
@@ -1321,7 +1358,6 @@ else:
                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (project_id, assign_id, number, pname, prole, page, pagency, pheight, pwaist, pdress, pavail, photo_path))
                             log_action(current_username, "add_participant", pname)
-                        # clear caches + reset paging so new participant is visible
                         try:
                             image_b64_for_path.clear()
                         except Exception:
@@ -1381,13 +1417,9 @@ else:
                     # If bulk_mode is active, render a small checkbox overlay in the card
                     bulk_html = ""
                     if st.session_state.get("bulk_mode", False):
-                        # render a visible checkbox inside the left column via markdown (actual checkbox inputs live outside / are Streamlit checkboxes)
-                        # We'll instead show a small visual marker and ensure the checkbox key exists in session_state
                         key = f"bulk_sel_{pid}"
-                        # ensure default exists
                         if key not in st.session_state:
                             st.session_state[key] = False
-                        # small inline HTML to show where checkbox will appear visually (checkbox control quantity is handled elsehwere)
                         bulk_html = f"<div class='bulk-check'>{'☑' if st.session_state.get(key) else '☐'}</div>"
 
                     card_html = f"""
@@ -1419,7 +1451,6 @@ else:
                                 log_action(current_username, "delete_participant", p["name"] or "")
                                 if st.session_state.get("editing_participant") == pid:
                                     st.session_state["editing_participant"] = None
-                            # clear caches + reset paging after delete
                             try:
                                 image_b64_for_path.clear()
                             except Exception:
@@ -1443,7 +1474,6 @@ else:
                             edress = st.text_input("Dress/Suit", value=safe_field(p, "dress_suit", ""), key=f"edress_{pid}")
                             eavail = st.text_input("Next Availability", value=safe_field(p, "availability", ""), key=f'eavail_{pid}')
                             ephoto = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"], key=f"ephoto_{pid}")
-                            # assign session quick control
                             with db_connect() as conn:
                                 sess_rows = list_sessions_for_project(conn, project_id)
                             assign_choices = [("Unassigned", None)] + [(s["name"], s["id"]) for s in sess_rows]
@@ -1474,7 +1504,6 @@ else:
                                             WHERE id=?
                                         """, (enumber, ename, erole, eage, eagency, eheight, ewaist, edress, eavail, new_photo_path, target_sid, pid))
                                         log_action(current_username, "edit_participant", ename)
-                                    # clear caches + reset paging so edit is visible
                                     try:
                                         image_b64_for_path.clear()
                                     except Exception:
@@ -1491,7 +1520,6 @@ else:
 
             # Grid view rendering
             else:
-                # create a responsive grid of 3 columns (falls back on narrow screens)
                 cols_count = 3
                 cols = st.columns(cols_count)
                 for i, p in enumerate(participants):
@@ -1509,12 +1537,10 @@ else:
                     role_html = safe_field(p, "role", "")
                     sess_label = sess_map.get(p["session_id"], "Unassigned")
 
-                    # show checkbox on tile if bulk mode
                     if st.session_state.get("bulk_mode", False):
                         key = f"bulk_sel_{pid}"
                         if key not in st.session_state:
                             st.session_state[key] = False
-                        # show marker above tile (visual)
                         bulk_marker = f"<div style='position:relative;top:-8px'>{'☑' if st.session_state.get(key) else '☐'}</div>"
                     else:
                         bulk_marker = ""
@@ -1528,7 +1554,6 @@ else:
                         </div>
                     """
                     c.markdown(card_html, unsafe_allow_html=True)
-                    # actions under each tile (compact)
                     acols = c.columns([1,1])
                     if acols[0].button("Edit", key=f"grid_edit_{pid}"):
                         st.session_state["editing_participant"] = pid
@@ -1551,7 +1576,6 @@ else:
                             safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to delete participant: {e}")
-                    # inline edit form for grid tiles (rendered below the grid tile area when activated)
                     if st.session_state.get("editing_participant") == pid:
                         with st.form(f"edit_participant_form_grid_{pid}"):
                             enumber = st.text_input("Number", value=safe_field(p, "number", ""), key=f"genumber_{pid}")
@@ -1788,3 +1812,4 @@ else:
                             safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to delete user: {e}")
+

@@ -20,6 +20,22 @@
 # the app will attempt to ALTER/CREATE where possible.
 
 import streamlit as st
+
+# --- Minimal safe UI tweak injected by assistant ---
+try:
+    st.markdown('''
+    <style>
+    html, body { background: linear-gradient(180deg,#f7f8fc 0%, #ffffff 60%); }
+    .card { background: #fff; border-radius:10px; padding:12px; box-shadow: 0 6px 18px rgba(28,31,40,0.04); }
+    .muted { color: rgba(0,0,0,0.6); }
+    input, textarea { padding: .5rem !important; }
+    button { border-radius:8px !important; }
+    </style>
+    ''', unsafe_allow_html=True)
+except Exception:
+    pass
+
+
 import sqlite3
 import json
 import os

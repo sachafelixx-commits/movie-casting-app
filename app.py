@@ -25,7 +25,6 @@ import streamlit as st
 try:
     st.markdown('''
     <style>
-    html, body { background: linear-gradient(180deg,#f7f8fc 0%, #ffffff 60%); }
     .card { background: #fff; border-radius:10px; padding:12px; box-shadow: 0 6px 18px rgba(28,31,40,0.04); }
     .muted { color: rgba(0,0,0,0.6); }
     input, textarea { padding: .5rem !important; }
@@ -64,6 +63,19 @@ try:
         '''
         <style>
         /* Use system UI stack for modern look */
+        html, body, .stApp {
+            background: linear-gradient(180deg, #0d1117 0%, #161b22 100%) !important;
+            color: #e6edf3 !important;
+        }
+        .stApp, .stMarkdown, .stText, .stTextInput, .stTextArea, .stSelectbox, .stButton>button {
+            color: #e6edf3 !important;
+        }
+        .card, .participant-letterbox, .stCard {
+            background: #1c2128 !important;
+            color: #e6edf3 !important;
+        }
+        .muted { color: rgba(230,237,243,0.7) !important; }
+    
         :root{
             --bg-1: #0f1724;
             --bg-2: #071028;
@@ -75,15 +87,12 @@ try:
         }
         /* page background gradient */
         html, body, .stApp {
-            background: radial-gradient(1200px 600px at 10% 10%, rgba(124,92,255,0.06), transparent 8%),
-                        linear-gradient(180deg, #fbfdff 0%, #f4f7fb 50%, #eef3ff 100%);
             color: #0b1220;
             font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
         }
         /* Top header bar */
         header .decoration { display: none; }
         .stApp > header {
-            background: linear-gradient(90deg, rgba(124,92,255,0.06), rgba(79,209,197,0.03));
             padding: 12px 18px;
             border-bottom-left-radius: 12px;
             border-bottom-right-radius: 12px;
@@ -91,7 +100,6 @@ try:
         /* Sidebar styling */
         .css-1d391kg { /* sidebar container — may change across Streamlit versions */ }
         .stSidebar {
-            background: linear-gradient(180deg, #ffffff, #fbfbff);
             border-right: 1px solid rgba(15,20,30,0.03);
             box-shadow: 0 10px 30px rgba(15,20,30,0.03) inset;
             padding: 18px !important;
@@ -106,13 +114,11 @@ try:
         }
         .stButton>button:active { transform: translateY(1px); }
         .stButton>button.primary, button[kind="primary"] {
-            background: linear-gradient(90deg, #7c5cff, #5b3eff) !important;
             color: white !important;
             border: none !important;
         }
         /* Card / participant look (radical) */
         .participant-letterbox, .card, .stCard {
-            background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(250,250,255,0.98));
             border-radius: 14px;
             padding: 14px !important;
             margin-bottom: 14px !important;
@@ -126,7 +132,6 @@ try:
             height: 240px;
             display:block;
             margin-bottom: 10px;
-            background: linear-gradient(90deg,#f6f7ff,#fffdf8);
         }
         .participant-letterbox .name{
             font-size: 1.12rem;
@@ -135,7 +140,6 @@ try:
             color: #0b1220;
         }
         .participant-letterbox .meta{ color: rgba(11,18,32,0.6); font-weight:600; }
-        .attr-chip{ background: linear-gradient(90deg,#f2f4ff,#f6fdff); padding:6px 10px; border-radius:999px; box-shadow:0 6px 18px rgba(16,24,40,0.03); margin-right:6px; }
 
         /* Grid layout for participants (responsive) */
         .participants-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; align-items:start; }
@@ -144,7 +148,6 @@ try:
         input, textarea, select { padding: 12px !important; border-radius:10px !important; border:1px solid rgba(11,18,32,0.06) !important; }
         /* Floating action bar on the bottom-right */
         .floating-actions { position: fixed; right: 24px; bottom: 24px; z-index: 9999; display:flex; gap:8px; flex-direction:column; }
-        .fab { background: linear-gradient(90deg,#7c5cff,#5b3eff); color:white; padding:12px 16px; border-radius:999px; font-weight:800; box-shadow: 0 12px 30px rgba(16,24,40,0.12); }
         /* Helper small text */
         .muted { color: rgba(11,18,32,0.45); font-size:0.92rem; }
 
@@ -158,7 +161,6 @@ try:
         <!-- Top-level, modern header with quick stats area -->
         <div style="display:flex;align-items:center;gap:18px;margin-bottom:14px;">
             <div style="display:flex;align-items:center;gap:12px;">
-                <div style="width:56px;height:56px;border-radius:12px;background:linear-gradient(90deg,#7c5cff,#5b3eff);display:flex;align-items:center;justify-content:center;color:white;font-weight:900;font-size:20px;">🎭</div>
                 <div>
                     <div style="font-size:18px;font-weight:900;color:#0b1220;">Sacha's Casting Manager</div>
                     <div style="color:rgba(11,18,32,0.6);font-size:13px;">Projects · Sessions · Participants — redesigned UI</div>
@@ -166,7 +168,6 @@ try:
             </div>
             <div style="margin-left:auto;display:flex;gap:12px;align-items:center;">
                 <div style="padding:8px 12px;border-radius:10px;background:#fff;border:1px solid rgba(11,18,32,0.03);box-shadow:0 8px 20px rgba(16,24,40,0.03)">
-                    <div style="font-size:12px;color:rgba(11,18,32,0.6);">Active Project</div>
                     <div style="font-weight:800;">{st.session_state.get('current_project_name', '—')}</div>
                 </div>
             </div>
@@ -1055,441 +1056,6 @@ else:
 
     active = st.session_state["current_project_name"]
     st.sidebar.markdown("---")
-    st.sidebar.subheader("Active Project")
-    st.sidebar.write(f"**{active}**")
-
-    # Participant kiosk (simpler, for check-ins)
-    if st.session_state["participant_mode"]:
-        st.title("👋 Casting Check-In")
-        st.caption("Fill in your details. Submissions go to the active project.")
-        st.info(f"Submitting to project: **{active}**")
-        with st.form("participant_form"):
-            number = st.text_input("Number")
-            name = st.text_input("Name")
-            role_in = st.text_input("Role")
-            age = st.text_input("Age")
-            agency = st.text_input("Agency")
-            height = st.text_input("Height")
-            waist = st.text_input("Waist")
-            dress_suit = st.text_input("Dress/Suit")
-            availability = st.text_input("Next Availability")
-            photo = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"])
-            submitted = st.form_submit_button("Submit")
-            if submitted:
-                with db_transaction() as conn:
-                    proj = get_project_by_name(conn, user_id, active)
-                    if not proj:
-                        pid = create_project(conn, user_id, active, "")
-                    else:
-                        pid = proj["id"]
-                    photo_path = save_photo_file(photo, current_username, active) if photo else None
-                    conn.execute("""
-                        INSERT INTO participants
-                        (project_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (pid, number, name, role_in, age, agency, height, waist, dress_suit, availability, photo_path))
-                    log_action(current_username, "participant_checkin", name)
-                st.success("✅ Thanks for checking in!")
-                # don't force immediate rerun — allow user to see success
-                time.sleep(0.2)
-                safe_rerun()
-
-    # Casting manager mode
-    else:
-        st.title("🎬 Sacha's Casting Manager")
-
-        # Project Manager UI
-        st.header("📁 Project Manager")
-        pm_col1, pm_col2 = st.columns([3,2])
-        with pm_col1:
-            query = st.text_input("Search projects by name or description")
-        with pm_col2:
-            sort_opt = st.selectbox("Sort by", ["Name A→Z", "Newest", "Oldest", "Most Participants", "Fewest Participants"], index=0)
-
-        # Create project (show success message, avoid immediate rerun so message visible)
-        with st.expander("➕ Create New Project", expanded=False):
-            with st.form("new_project_form"):
-                p_name = st.text_input("Project Name")
-                p_desc = st.text_area("Description", height=80)
-                create_btn = st.form_submit_button("Create Project")
-                if create_btn:
-                    if not p_name:
-                        st.error("Provide a project name")
-                    else:
-                        try:
-                            with db_transaction() as conn:
-                                existing = get_project_by_name(conn, user_id, p_name)
-                                if existing:
-                                    st.error("Project with this name exists")
-                                else:
-                                    create_project(conn, user_id, p_name, p_desc or "")
-                                    log_action(current_username, "create_project", p_name)
-                                    st.success(f"Project '{p_name}' created.")
-                                    # set active project so later UI shows it
-                                    st.session_state["current_project_name"] = p_name
-                                    # let the rest of the run update views (no immediate rerun)
-                        except Exception as e:
-                            st.error(f"Unable to create project: {e}")
-
-        # fetch fresh projects (batched counts)
-        conn_read = get_db_conn()
-        proj_rows = list_projects_with_counts(conn_read, user_id)
-        proj_items = []
-        for r in proj_rows:
-            proj_items.append((r["name"], r["description"], r["created_at"], r["participant_count"]))
-
-        if query:
-            q = query.lower().strip()
-            proj_items = [x for x in proj_items if q in x[0].lower() or q in (x[1] or "").lower()]
-
-        if sort_opt == "Name A→Z":
-            proj_items.sort(key=lambda x: x[0].lower())
-        elif sort_opt == "Newest":
-            proj_items.sort(key=lambda x: x[2], reverse=True)
-        elif sort_opt == "Oldest":
-            proj_items.sort(key=lambda x: x[2])
-        elif sort_opt == "Most Participants":
-            proj_items.sort(key=lambda x: x[3], reverse=True)
-        elif sort_opt == "Fewest Participants":
-            proj_items.sort(key=lambda x: x[3])
-
-        # header
-        hdr = st.columns([3,4,2,2,4])
-        hdr[0].markdown("**Project**"); hdr[1].markdown("**Description**"); hdr[2].markdown("**Created**"); hdr[3].markdown("**Participants**"); hdr[4].markdown("**Actions**")
-
-        for name, desc, created, count in proj_items:
-            is_active = (name == st.session_state.get("current_project_name"))
-            cols = st.columns([3,4,2,2,4])
-            cols[0].markdown(f"{'🟢 ' if is_active else ''}**{name}**")
-            cols[1].markdown(desc or "—")
-            cols[2].markdown((created or "").split("T")[0])
-            cols[3].markdown(str(count))
-            a1, a2, a3 = cols[4].columns([1,1,1])
-            if a1.button("Set Active", key=f"setactive_{name}"):
-                st.session_state["current_project_name"] = name
-                safe_rerun()
-            if a2.button("Edit", key=f"editproj_{name}"):
-                st.session_state["editing_project"] = name
-                safe_rerun()
-            if a3.button("Delete", key=f"delproj_{name}"):
-                st.session_state["confirm_delete_project"] = name
-                safe_rerun()
-
-            # inline edit
-            if st.session_state.get("editing_project") == name:
-                with st.form(f"edit_project_form_{name}"):
-                    new_name = st.text_input("Project Name", value=name)
-                    new_desc = st.text_area("Description", value=desc, height=100)
-                    c1,c2 = st.columns(2)
-                    save_changes = c1.form_submit_button("Save")
-                    cancel_edit = c2.form_submit_button("Cancel")
-                    if save_changes:
-                        if not new_name:
-                            st.error("Name cannot be empty")
-                        else:
-                            try:
-                                with db_transaction() as conn:
-                                    proj = get_project_by_name(conn, user_id, name)
-                                    if not proj:
-                                        st.error("Project not found")
-                                    else:
-                                        conn.execute("UPDATE projects SET name=?, description=? WHERE id=?", (new_name, new_desc, proj["id"]))
-                                        rename_project_move_media(name, new_name, current_username)
-                                        log_action(current_username, "edit_project", f"{name} -> {new_name}")
-                                st.success("Project updated.")
-                                st.session_state["editing_project"] = None
-                                if st.session_state.get("current_project_name") == name:
-                                    st.session_state["current_project_name"] = new_name
-                                safe_rerun()
-                            except Exception as e:
-                                st.error(f"Unable to save project: {e}")
-                    if cancel_edit:
-                        st.session_state["editing_project"] = None
-                        safe_rerun()
-
-            # delete confirmation
-            if st.session_state.get("confirm_delete_project") == name:
-                st.warning(f"Type project name **{name}** to confirm deletion. This cannot be undone.")
-                with st.form(f"confirm_delete_{name}"):
-                    confirm_text = st.text_input("Confirm name")
-                    d1,d2 = st.columns(2)
-                    do_delete = d1.form_submit_button("Delete Permanently")
-                    cancel_delete = d2.form_submit_button("Cancel")
-                    if do_delete:
-                        if confirm_text == name:
-                            try:
-                                with db_transaction() as conn:
-                                    proj = get_project_by_name(conn, user_id, name)
-                                    if not proj:
-                                        st.error("Project not found")
-                                    else:
-                                        pid = proj["id"]
-                                        c = conn.cursor()
-                                        c.execute("SELECT photo_path FROM participants WHERE project_id=?", (pid,))
-                                        rows = c.fetchall()
-                                        for r in rows:
-                                            pf = r["photo_path"]
-                                            if isinstance(pf, str) and os.path.exists(pf):
-                                                remove_media_file(pf)
-                                        c.execute("DELETE FROM participants WHERE project_id=?", (pid,))
-                                        c.execute("DELETE FROM sessions WHERE project_id=?", (pid,))
-                                        c.execute("DELETE FROM projects WHERE id=?", (pid,))
-                                        delete_project_media(current_username, name)
-                                        log_action(current_username, "delete_project", name)
-                                st.success(f"Project '{name}' deleted.")
-                                if st.session_state.get("current_project_name") == name:
-                                    st.session_state["current_project_name"] = None
-                                st.session_state["confirm_delete_project"] = None
-                                safe_rerun()
-                            except Exception as e:
-                                st.error(f"Unable to delete project: {e}")
-                        else:
-                            st.error("Project name mismatch. Not deleted.")
-                    if cancel_delete:
-                        st.session_state["confirm_delete_project"] = None
-                        safe_rerun()
-
-        # ------------------------
-        # Participant + Session management UI
-        # ------------------------
-        current = st.session_state["current_project_name"]
-        with db_connect() as conn:
-            proj = get_project_by_name(conn, user_id, current)
-        if not proj:
-            with db_transaction() as conn:
-                create_project(conn, user_id, current, "")
-            with db_connect() as conn:
-                proj = get_project_by_name(conn, user_id, current)
-
-        project_id = proj["id"]
-
-        # Sessions panel
-        st.subheader("🗓️ Sessions")
-        sess_col1, sess_col2 = st.columns([3,2])
-        with sess_col1:
-            sess_query = st.text_input("Search sessions by name or description", key="sess_query")
-        with sess_col2:
-            sess_sort = st.selectbox("Sort sessions", ["Date", "Newest", "Oldest", "Name"], index=0, key="sess_sort")
-
-        # create session
-        with st.expander("➕ Create New Session", expanded=False):
-            with st.form("new_session_form"):
-                s_name = st.text_input("Session Name")
-                s_date = st.date_input("Date (optional)")
-                s_desc = st.text_area("Description", height=80)
-                s_create = st.form_submit_button("Create Session")
-                if s_create:
-                    if not s_name:
-                        st.error("Provide a session name")
-                    else:
-                        try:
-                            with db_transaction() as conn:
-                                create_session(conn, project_id, s_name, s_date.isoformat() if s_date else None, s_desc or "")
-                                log_action(current_username, "create_session", f"{s_name}")
-                            st.success(f"Session '{s_name}' created.")
-                            safe_rerun()
-                        except Exception as e:
-                            st.error(f"Unable to create session: {e}")
-
-        # list sessions
-        with db_connect() as conn:
-            sessions = list_sessions_for_project(conn, project_id)
-        view_sessions = []
-        for s in sessions:
-            view_sessions.append((s["id"], s["name"], s["date"], s["description"]))
-
-        if sess_query:
-            q = sess_query.lower().strip()
-            view_sessions = [x for x in view_sessions if q in x[1].lower() or q in (x[3] or "").lower()]
-
-        # sort
-        if sess_sort == "Name":
-            view_sessions.sort(key=lambda x: (x[1] or "").lower())
-        elif sess_sort == "Newest":
-            view_sessions.sort(key=lambda x: x[2] or "", reverse=True)
-        elif sess_sort == "Oldest":
-            view_sessions.sort(key=lambda x: x[2] or "")
-        elif sess_sort == "Date":
-            # put dated first
-            view_sessions.sort(key=lambda x: (x[2] is None, x[2] or ""))
-
-        # render sessions with actions
-        sess_hdr = st.columns([4,2,2,2])
-        sess_hdr[0].markdown("**Session**")
-        sess_hdr[1].markdown("**Date**")
-        sess_hdr[2].markdown("**Participants**")
-        sess_hdr[3].markdown("**Actions**")
-
-        # precompute participant counts by session
-        with db_connect() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT session_id, COUNT(*) as cnt FROM participants WHERE project_id=? GROUP BY session_id", (project_id,))
-            counts_map = {r["session_id"]: r["cnt"] for r in cur.fetchall()}
-
-        for sid, sname, sdate, sdesc in view_sessions:
-            cnt = counts_map.get(sid, 0)
-            cols = st.columns([4,2,2,2])
-            cols[0].markdown(f"**{sname}**  \n{sdesc or ''}")
-            cols[1].markdown((sdate or "—"))
-            cols[2].markdown(str(cnt))
-            ca, cb = cols[3].columns([1,1])
-            if ca.button("View", key=f"view_sess_{sid}"):
-                st.session_state["view_mode"] = "session"
-                st.session_state["view_session_id"] = sid
-                safe_rerun()
-            if cb.button("Delete", key=f"del_sess_{sid}"):
-                if st.confirm(f"Delete session '{sname}'? Participants will become unassigned. Continue?"):
-                    try:
-                        with db_transaction() as conn:
-                            # unassign participants
-                            cur = conn.cursor()
-                            cur.execute("UPDATE participants SET session_id=NULL WHERE session_id=?", (sid,))
-                            delete_session(conn, sid)
-                            log_action(current_username, "delete_session", f"{sname}")
-                        st.success("Session deleted.")
-                        safe_rerun()
-                    except Exception as e:
-                        st.error(f"Unable to delete session: {e}")
-
-        # option to view all participants
-        view_all_btn = st.button("View All Participants", key="view_all_btn")
-        if view_all_btn:
-            st.session_state["view_mode"] = "all"
-            st.session_state["view_session_id"] = None
-            safe_rerun()
-
-        # Participant management UI
-        st.header(f"👥 Participants — {current}")
-
-        with st.expander("➕ Add New Participant"):
-            with st.form("add_participant"):
-                number = st.text_input("Number")
-                pname = st.text_input("Name")
-                prole = st.text_input("Role")
-                page = st.text_input("Age")
-                pagency = st.text_input("Agency")
-                pheight = st.text_input("Height")
-                pwaist = st.text_input("Waist")
-                pdress = st.text_input("Dress/Suit")
-                pavail = st.text_input("Next Availability")
-                p_session = None
-                # allow quick assign to a session on create
-                sess_options = [("Unassigned", None)] + [(s["name"], s["id"]) for s in sessions]
-                # display as selectbox
-                sess_choice = st.selectbox("Assign to session (optional)", options=[x[0] for x in sess_options])
-                for n,v in sess_options:
-                    if n == sess_choice:
-                        p_session = v
-                        break
-                photo = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"])
-                submitted = st.form_submit_button("Add Participant")
-                if submitted:
-                    try:
-                        with db_transaction() as conn:
-                            photo_path = save_photo_file(photo, current_username, current) if photo else None
-                            conn.execute("""
-                                INSERT INTO participants
-                                (project_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path, session_id)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (project_id, number, pname, prole, page, pagency, pheight, pwaist, pdress, pavail, photo_path, p_session))
-                            log_action(current_username, "add_participant", pname)
-                        st.success("Participant added!")
-                        safe_rerun()
-                    except Exception as e:
-                        st.error(f"Unable to add participant: {e}")
-
-        # list participants filtered by view_mode
-        if st.session_state.get("view_mode") == "session" and st.session_state.get("view_session_id"):
-            cur_view_session = st.session_state["view_session_id"]
-            header_text = f"Participants — Session view"
-            with db_connect() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT * FROM participants WHERE project_id=? AND session_id=? ORDER BY id", (project_id, cur_view_session))
-                participants = cur.fetchall()
-        else:
-            # view all
-            header_text = "Participants — All"
-            with db_connect() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT * FROM participants WHERE project_id=? ORDER BY id", (project_id,))
-                participants = cur.fetchall()
-
-        st.subheader(header_text)
-
-        if not participants:
-            st.info("No participants yet.")
-        else:
-            # Bulk controls
-            st.markdown("**Bulk actions:**")
-            bulk_cols = st.columns([1,1,1,2])
-            bulk_select_action = bulk_cols[0].selectbox("Select action", ["Select", "Deselect", "Invert"], index=0, key="bulk_action_select")
-            if bulk_cols[1].button("Apply selection"):
-                # apply selection action to visible participants
-                ids = [p["id"] for p in participants]
-                if bulk_select_action == "Select":
-                    st.session_state["bulk_selection"].update(ids)
-                elif bulk_select_action == "Deselect":
-                    st.session_state["bulk_selection"].difference_update(ids)
-                else:  # Invert
-                    new_sel = set(ids).difference(st.session_state["bulk_selection"])
-                    st.session_state["bulk_selection"].difference_update(ids)
-                    st.session_state["bulk_selection"].update(new_sel)
-                st.success("Selection updated.")
-                safe_rerun()
-            bulk_target_session = None
-            sess_map = {None: "Unassigned"}
-            for s in sessions:
-                sess_map[s["id"]] = s["name"]
-            # choices display
-            sess_choice_bulk = bulk_cols[2].selectbox("Move selected to session (or Unassigned)", options=list(sess_map.values()))
-            # resolve target id
-            for k,v in sess_map.items():
-                if v == sess_choice_bulk:
-                    bulk_target_session = k
-                    break
-            copy_or_cut = bulk_cols[3].selectbox("Copy or Move?", ["Move (cut)", "Copy"], index=0)
-
-            # Show bulk move/copy button
-            if st.button("Apply bulk action (Move/Copy)"):
-                sel_ids = list(st.session_state["bulk_selection"])
-                if not sel_ids:
-                    st.warning("No participants selected.")
-                else:
-                    try:
-                        with db_transaction() as conn:
-                            # if copy: duplicate participant rows with new session_id
-                            cur = conn.cursor()
-                            if copy_or_cut == "Copy":
-                                for pid in sel_ids:
-                                    cur.execute("SELECT * FROM participants WHERE id=?", (pid,))
-                                    row = cur.fetchone()
-                                    if not row:
-                                        continue
-                                    cur.execute("""INSERT INTO participants
-                                        (project_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path, session_id)
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                                        (project_id, row["number"], row["name"], row["role"], row["age"], row["agency"], row["height"], row["waist"], row["dress_suit"], row["availability"], row["photo_path"], bulk_target_session))
-                            else:
-                                # Move (update session_id)
-                                cur.executemany("UPDATE participants SET session_id=? WHERE id=?", [(bulk_target_session, pid) for pid in sel_ids])
-                            log_action(current_username, "bulk_move_copy", f"{len(sel_ids)} items -> session {bulk_target_session}")
-                        st.success("Bulk action applied.")
-                        # clear selection
-                        st.session_state["bulk_selection"].clear()
-                        safe_rerun()
-                    except Exception as e:
-                        st.error(f"Bulk action failed: {e}")
-
-            # Render participants in letterbox cards with right-side actions
-            for p in participants:
-                pid = p["id"]
-                left, right = st.columns([9,1])
-                display_path = thumb_path_for(safe_field(p, "photo_path", ""))
-                data_uri = image_b64_for_path(display_path) if display_path else None
-                if data_uri:
-                    img_tag = f"<img class='photo' src='{data_uri}' alt='photo'/>"
-                else:
-                    img_tag = "<div class='photo' style='display:flex;align-items:center;justify-content:center;color:#777'>No Photo</div>"
 
                 name_html = safe_field(p, "name", "Unnamed")
                 number_html = safe_field(p, "number", "")

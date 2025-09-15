@@ -1738,16 +1738,3 @@ else:
                             safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to delete user: {e}")
-
-
-
-
-
-
-
-
-
-
-
-
-

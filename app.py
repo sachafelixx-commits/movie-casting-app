@@ -1650,3 +1650,91 @@ else:
                             st.error(f"Unable to delete user: {e}")
 
 
+
+# ------------------------
+# Admin-only: Database Manager
+# (appended by assistant; does not change other logic)
+# ------------------------
+try:
+    if role == \"Admin\":
+        st.subheader(\"🗄️ Database Manager\")
+
+        st.write(\"Download the current SQLite database, or upload a replacement (admin only).\\n\\n**Warning:** uploading a new database will replace the current one after a backup is made.\")
+
+        # Download current DB
+        try:
+            if os.path.exists(DB_FILE):
+                with open(DB_FILE, \"rb\") as _f:
+                    db_bytes = _f.read()
+                st.download_button(\"⬇️ Download current database\", data=db_bytes, file_name=os.path.basename(DB_FILE), mime=\"application/x-sqlite3\")
+            else:
+                st.info(\"No database file found to download.\")
+        except Exception as e:
+            st.error(f\"Unable to prepare database download: {e}\")
+
+        st.markdown(\"---\")
+
+        # Upload replacement DB
+        uploaded = st.file_uploader(\"Upload a replacement SQLite database (.db, .sqlite)\", type=[\"db\",\"sqlite\",\"sqlite3\"], key=\"db_upload\")
+
+        if uploaded is not None:
+            # Read uploaded bytes
+            try:
+                uploaded_bytes = uploaded.read()
+            except Exception as e:
+                st.error(f\"Failed to read uploaded file: {e}\")
+                uploaded_bytes = None
+
+            if uploaded_bytes:
+                # Show filename and filesize
+                st.info(f\"Uploaded: {uploaded.name} ({len(uploaded_bytes)} bytes)\")
+                if st.button(\"Confirm: Replace current database with uploaded file\"):
+                    try:
+                        # Close cached DB connection if present
+                        try:
+                            conn_cached = get_db_conn()
+                            try:
+                                conn_cached.close()
+                            except Exception:
+                                pass
+                        except Exception:
+                            conn_cached = None
+                        # clear cached resources so new DB is reloaded
+                        try:
+                            st.cache_resource.clear()
+                        except Exception:
+                            try:
+                                get_db_conn.clear()
+                            except Exception:
+                                pass
+
+                        # backup current DB
+                        timestamp = datetime.now().strftime(\"%Y%m%d_%H%M%S\")
+                        backup_dir = os.path.join(MEDIA_DIR, \"db_backups\")
+                        os.makedirs(backup_dir, exist_ok=True)
+                        if os.path.exists(DB_FILE):
+                            backup_path = os.path.join(backup_dir, f\"data_{timestamp}.db\")
+                            shutil.copy2(DB_FILE, backup_path)
+                            log_action(current_username, \"db_backup\", backup_path)
+                        # write the uploaded bytes to DB_FILE
+                        with open(DB_FILE, \"wb\") as out_f:
+                            out_f.write(uploaded_bytes)
+                            out_f.flush()
+                            os.fsync(out_f.fileno())
+                        log_action(current_username, \"db_replace\", uploaded.name)
+                        st.success(\"Database replaced successfully. A backup was created.\")
+                        # re-init DB (in case schema missing)
+                        try:
+                            init_db()
+                        except Exception:
+                            pass
+                        # force a rerun so cached connections update
+                        safe_rerun()
+                    except Exception as e:
+                        st.error(f\"Failed to replace database: {e}\")
+except Exception:
+    # do not let the admin UI crash the app
+    pass
+
+
+

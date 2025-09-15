@@ -46,36 +46,104 @@ DB_FILE = "data.db"
 
 # --- Safety: ensure required DB schema + permanent admin user ---
 def _ensure_admin_and_schema():
-    \"\"\"Ensure that the database has the required tables and a permanent admin user.
+    """Ensure that the database has the required tables and a permanent admin user.
     This helps keep an admin login (admin / supersecret) available even if the DB file is replaced.
     The routine is conservative: it only creates missing tables and the admin user when absent.
-    \"\"\"\    # defensive imports
+    """
     try:
         import sqlite3 as _sqlite
         _conn = _sqlite.connect(DB_FILE)
         _cur = _conn.cursor()
         try:
-            _cur.execute(\"PRAGMA integrity_check;\")
+            _cur.execute("PRAGMA integrity_check;")
             res = _cur.fetchone()
             if not res or (isinstance(res, tuple) and res[0] != 'ok') or (isinstance(res, str) and res != 'ok'):
-                # If DB corrupted, do not try complex repair here; just return and let init_db handle fresh creation.
-                # We do not overwrite corrupted DB here to avoid data loss.
                 _conn.close()
                 return
         except Exception:
-            # If pragma fails, bail out gently
             try:
                 _conn.close()
             except Exception:
                 pass
             return
-        # check for users table
-        try:
-            _cur.execute(\"SELECT name FROM sqlite_master WHERE type='table' AND name='users'\")
-            if not _cur.fetchone():
-                # create minimal schema (same as init_db's schema)
-                _schema = \"\"\"\n                CREATE TABLE IF NOT EXISTS users (\n                    id INTEGER PRIMARY KEY,\n                    username TEXT NOT NULL UNIQUE,\n                    password TEXT NOT NULL,\n                    role TEXT NOT NULL,\n                    last_login TEXT\n                );\n                CREATE TABLE IF NOT EXISTS projects (\n                    id INTEGER PRIMARY KEY,\n                    user_id INTEGER NOT NULL,\n                    name TEXT NOT NULL,\n                    description TEXT,\n                    created_at TEXT\n                );\n                CREATE TABLE IF NOT EXISTS participants (\n                    id INTEGER PRIMARY KEY,\n                    project_id INTEGER NOT NULL,\n                    number TEXT,\n                    name TEXT,\n                    role TEXT,\n                    age TEXT,\n                    agency TEXT,\n                    height TEXT,\n                    waist TEXT,\n                    dress_suit TEXT,\n                    availability TEXT,\n                    photo_path TEXT,\n                    session_id INTEGER\n                );\n                CREATE TABLE IF NOT EXISTS sessions (\n                    id INTEGER PRIMARY KEY,\n                    project_id INTEGER NOT NULL,\n                    name TEXT NOT NULL,\n                    date TEXT,\n                    description TEXT,\n                    created_at TEXT\n                );\n                CREATE TABLE IF NOT EXISTS logs (\n                    id INTEGER PRIMARY KEY,\n                    timestamp TEXT,\n                    user TEXT,\n                    action TEXT,\n                    details TEXT\n                );\n                CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);\n                CREATE INDEX IF NOT EXISTS idx_participants_project ON participants(project_id);\n                CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);\n                \"\"\"\n                _cur.executescript(_schema)\n                _conn.commit()\n        except Exception:\n            pass\n        # ensure admin user exists (username admin / password supersecret)
-        try:\n            _cur.execute(\"SELECT id FROM users WHERE username=?\", (\"admin\",))\n            if not _cur.fetchone():\n                _pw = hashlib.sha256(\"supersecret\".encode()).hexdigest()\n                _now = datetime.now().isoformat()\n                try:\n                    _cur.execute(\"INSERT INTO users (username, password, role, last_login) VALUES (?, ?, ?, ?)\",\n                                 (\"admin\", _pw, \"Admin\", _now))\n                    _conn.commit()\n                except Exception:\n                    # if insert fails (e.g., users table missing), ignore\n                    pass\n        except Exception:\n            pass\n        try:\n            _conn.close()\n        except Exception:\n            pass\n    except Exception:\n        # don't let safety routine crash the app\n        pass\n\n# Run safety routine early\n_ensure_admin_and_schema()\n
+
+        # Ensure users table exists
+        _cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+        if not _cur.fetchone():
+            _schema = """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                password TEXT NOT NULL,
+                role TEXT NOT NULL,
+                last_login TEXT
+            );
+            CREATE TABLE IF NOT EXISTS projects (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS participants (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                number TEXT,
+                name TEXT,
+                role TEXT,
+                age TEXT,
+                agency TEXT,
+                height TEXT,
+                waist TEXT,
+                dress_suit TEXT,
+                availability TEXT,
+                photo_path TEXT,
+                session_id INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                date TEXT,
+                description TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT,
+                user TEXT,
+                action TEXT,
+                details TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
+            CREATE INDEX IF NOT EXISTS idx_participants_project ON participants(project_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+            """
+            _cur.executescript(_schema)
+            _conn.commit()
+
+        # Ensure admin user exists
+        _cur.execute("SELECT id FROM users WHERE username=?", ("admin",))
+        if not _cur.fetchone():
+            import hashlib
+            from datetime import datetime
+            pw = hashlib.sha256("supersecret".encode()).hexdigest()
+            now = datetime.now().isoformat()
+            _cur.execute(
+                "INSERT INTO users (username, password, role, last_login) VALUES (?, ?, ?, ?)",
+                ("admin", pw, "Admin", now)
+            )
+            _conn.commit()
+
+        _conn.close()
+    except Exception:
+        # don't let safety routine crash the app
+        pass
+
+# Run safety routine early
+_ensure_admin_and_schema()
+
+
 USERS_JSON = "users.json"   # used only for migration (optional)
 MEDIA_DIR = "media"
 MIGRATION_MARKER = os.path.join(MEDIA_DIR, ".db_migrated")
@@ -1681,6 +1749,7 @@ else:
                             safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to delete user: {e}")
+
 
 
 

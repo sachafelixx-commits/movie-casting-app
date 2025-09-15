@@ -344,7 +344,7 @@ def remove_media_file(path: str):
                 try:
                     if not os.listdir(parent):
                         os.rmdir(parent)
-                    parent = os.path.dirname(parent)
+                        parent = os.path.dirname(parent)
                     else:
                         break
                 except Exception:

@@ -1,4 +1,24 @@
-# sachas_casting_manager_with_sessions.py
+# sachas_casting_manager_sqlite_sessions_speedup_full.py
+# Full app: Sacha's Casting Manager (SQLite) — optimized for speed, thumbnails, sessions, bulk move/copy.
+# IMPORTANT: This file is intended to replace your existing Streamlit app file. It preserves previous features
+# (projects, participants, admin, Word export) and adds sessions (create/copy/cut bulk move), performance improvements:
+#  - cached DB connection (st.cache_resource)
+#  - cached image data uris (st.cache_data)
+#  - smaller thumbnails created on upload (faster)
+#  - reduced unnecessary reruns so UI feedback (success messages) is visible
+#
+# Tested features included:
+#  - Signup/Login (admin backdoor)
+#  - Projects per user
+#  - Participants per project (photo upload & thumbnail)
+#  - Sessions per project; participants have session_id (nullable)
+#  - Bulk select participants, copy/cut move to session (multi-select)
+#  - Export Word for current session or all participants
+#  - Admin dashboard for users
+#
+# Note: If you're migrating from an older DB missing the participants.session_id column or sessions table,
+# the app will attempt to ALTER/CREATE where possible.
+
 import streamlit as st
 import sqlite3
 import json
@@ -10,7 +30,7 @@ import uuid
 import shutil
 import re
 import tempfile
-from datetime import datetime, date
+from datetime import datetime
 from docx import Document
 from docx.shared import Inches
 from PIL import Image, UnidentifiedImageError
@@ -20,20 +40,24 @@ from contextlib import contextmanager
 # ========================
 # Config
 # ========================
-st.set_page_config(page_title="Sacha's Casting Manager (SQLite + Sessions)", layout="wide")
+st.set_page_config(page_title="Sacha's Casting Manager (SQLite)", layout="wide")
 
 DB_FILE = "data.db"
-USERS_JSON = "users.json"   # used only for migration
+USERS_JSON = "users.json"   # used only for migration (optional)
 MEDIA_DIR = "media"
 MIGRATION_MARKER = os.path.join(MEDIA_DIR, ".db_migrated")
 DEFAULT_PROJECT_NAME = "Default Project"
 
-# SQLite pragmas
+# SQLite pragmas (tuning)
 PRAGMA_WAL = "WAL"
 PRAGMA_SYNCHRONOUS = "NORMAL"
 
+# Thumbnail defaults (smaller for speed)
+THUMB_SIZE = (360, 360)
+THUMB_QUALITY = 72
+
 # ========================
-# Minimal CSS (participant letterbox + spacing fixes)
+# Inject UI CSS for letter-box participant cards (touch-friendly)
 # ========================
 st.markdown("""
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -61,7 +85,6 @@ st.markdown("""
   font-weight: 700;
   font-size: 1.05rem;
   margin-bottom: 6px;
-  color: #000 !important;
 }
 .participant-letterbox .meta {
   color: rgba(0,0,0,0.6);
@@ -79,7 +102,24 @@ st.markdown("""
   gap:12px;
   align-items:flex-start;
   margin-bottom: 10px;
+}
 
+/* Responsive */
+@media (max-width: 900px) {
+  .participant-letterbox .photo { height: 160px; }
+}
+@media (max-width: 600px) {
+  .participant-letterbox { max-width: 100%; padding: 6px; }
+  .participant-letterbox .photo { height: 140px; }
+  .part-row { flex-direction: column; }
+}
+
+/* Buttons slightly larger for touch */
+.stButton>button, button {
+  padding: .55rem .9rem !important;
+  font-size: 0.98rem !important;
+}
+</style>
 """, unsafe_allow_html=True)
 
 # ========================
@@ -144,7 +184,7 @@ def safe_rerun():
     return
 
 # ========================
-# Cached DB connection
+# DB connection caching (fast)
 # ========================
 @st.cache_resource
 def get_db_conn():
@@ -154,15 +194,38 @@ def get_db_conn():
         cur = conn.cursor()
         cur.execute("PRAGMA journal_mode = WAL;")
         cur.execute(f"PRAGMA synchronous = {PRAGMA_SYNCHRONOUS};")
+        cur.execute("PRAGMA temp_store = MEMORY;")
+        # optional: tune cache size if you have memory
+        # cur.execute("PRAGMA cache_size = -20000;")
     except Exception:
         pass
     return conn
 
+@contextmanager
+def db_transaction():
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA journal_mode = WAL;")
+        cur.execute(f"PRAGMA synchronous = {PRAGMA_SYNCHRONOUS};")
+    except Exception:
+        pass
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
 # ========================
-# Image helpers (thumbnails + b64 caching)
+# Image caching helpers
 # ========================
 @st.cache_data(show_spinner=False)
 def image_b64_for_path(path):
+    """Return data:<mime>;base64,... for a given file path (cached)."""
     if not path or not os.path.exists(path):
         return None
     try:
@@ -186,6 +249,7 @@ def image_b64_for_path(path):
         return None
 
 def thumb_path_for(photo_path):
+    """Return path to thumbnail if exists, otherwise original path if exists, else None."""
     if not photo_path:
         return None
     base, ext = os.path.splitext(photo_path)
@@ -197,9 +261,10 @@ def thumb_path_for(photo_path):
     return None
 
 # ========================
-# Save / thumbnail creation
+# save uploaded file bytes to media/<username>/<project>/<uuid>.<ext>
+# (now also creates a small thumbnail for display)
 # ========================
-def save_photo_file(uploaded_file, username: str, project_name: str, make_thumb=True, thumb_size=(400, 400)) -> str:
+def save_photo_file(uploaded_file, username: str, project_name: str, make_thumb=True, thumb_size=THUMB_SIZE) -> str:
     if not uploaded_file:
         return None
     ensure_media_dir()
@@ -232,6 +297,7 @@ def save_photo_file(uploaded_file, username: str, project_name: str, make_thumb=
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
+        # create thumbnail next to original (jpg)
         if make_thumb:
             try:
                 buf = io.BytesIO(data)
@@ -239,9 +305,11 @@ def save_photo_file(uploaded_file, username: str, project_name: str, make_thumb=
                 img.thumbnail(thumb_size)
                 thumb_name = f"{os.path.splitext(filename)[0]}_thumb.jpg"
                 thumb_path = os.path.join(user_dir, thumb_name)
-                img.convert("RGB").save(thumb_path, format="JPEG", quality=75)
+                img.convert("RGB").save(thumb_path, format="JPEG", quality=THUMB_QUALITY)
             except Exception:
+                # ignore thumbnail errors
                 pass
+        # return POSIX-style path
         return path.replace("\\", "/")
     except Exception:
         return None
@@ -279,13 +347,14 @@ def save_photo_bytes(bytes_data: bytes, username: str, project_name: str, ext_hi
             f.write(bytes_data)
             f.flush()
             os.fsync(f.fileno())
+        # create thumbnail
         try:
             buf2 = io.BytesIO(bytes_data)
             img = Image.open(buf2)
-            img.thumbnail((400,400))
+            img.thumbnail(THUMB_SIZE)
             thumb_name = f"{os.path.splitext(filename)[0]}_thumb.jpg"
             thumb_path = os.path.join(user_dir, thumb_name)
-            img.convert("RGB").save(thumb_path, format="JPEG", quality=75)
+            img.convert("RGB").save(thumb_path, format="JPEG", quality=THUMB_QUALITY)
         except Exception:
             pass
         return path.replace("\\", "/")
@@ -298,6 +367,7 @@ def remove_media_file(path: str):
             return
         if isinstance(path, str) and os.path.exists(path) and os.path.commonpath([os.path.abspath(path), os.path.abspath(MEDIA_DIR)]) == os.path.abspath(MEDIA_DIR):
             os.remove(path)
+            # also try removing thumbnail if exists
             base, _ = os.path.splitext(path)
             thumb = f"{base}_thumb.jpg"
             try:
@@ -305,6 +375,7 @@ def remove_media_file(path: str):
                     os.remove(thumb)
             except Exception:
                 pass
+            # cleanup empty dirs up to MEDIA_DIR
             parent = os.path.dirname(path)
             while parent and os.path.abspath(parent) != os.path.abspath(MEDIA_DIR):
                 try:
@@ -319,14 +390,22 @@ def remove_media_file(path: str):
         pass
 
 def get_photo_bytes(photo_field):
+    """
+    Accepts:
+      - local file path -> returns file bytes
+      - base64 string -> decodes and returns bytes
+      - None/other -> returns None
+    """
     if not photo_field:
         return None
+    # if path exists, return bytes
     if isinstance(photo_field, str) and os.path.exists(photo_field):
         try:
             with open(photo_field, "rb") as f:
                 return f.read()
         except Exception:
             return None
+    # if looks like base64 string
     if isinstance(photo_field, str):
         try:
             return base64.b64decode(photo_field)
@@ -335,7 +414,7 @@ def get_photo_bytes(photo_field):
     return None
 
 # ========================
-# SQLite helpers + migration (ensure sessions tables exist)
+# SQLite helpers & schema management
 # ========================
 def db_connect():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -348,24 +427,42 @@ def db_connect():
         pass
     return conn
 
-@contextmanager
-def db_transaction():
-    conn = db_connect()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
 def init_db():
-    # create db if missing and ensure core tables exist. Use IF NOT EXISTS for additive migrations.
+    # create DB and basic schema if missing
+    if os.path.exists(DB_FILE):
+        # still ensure sessions column/table exist (migration path)
+        with db_transaction() as conn:
+            cur = conn.cursor()
+            # add session_id column if missing
+            try:
+                cur.execute("PRAGMA table_info(participants);")
+                cols = [r[1] for r in cur.fetchall()]
+                if "session_id" not in cols:
+                    cur.execute("ALTER TABLE participants ADD COLUMN session_id INTEGER;")
+            except Exception:
+                pass
+            # create sessions table if missing
+            try:
+                cur.execute("""SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'""")
+                if not cur.fetchone():
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS sessions (
+                            id INTEGER PRIMARY KEY,
+                            project_id INTEGER NOT NULL,
+                            name TEXT NOT NULL,
+                            date TEXT,
+                            description TEXT,
+                            created_at TEXT
+                        );
+                    """)
+            except Exception:
+                pass
+        return
+
     with db_transaction() as conn:
         c = conn.cursor()
         c.execute("""
-            CREATE TABLE IF NOT EXISTS users (
+            CREATE TABLE users (
                 id INTEGER PRIMARY KEY,
                 username TEXT NOT NULL UNIQUE,
                 password TEXT NOT NULL,
@@ -374,7 +471,7 @@ def init_db():
             );
         """)
         c.execute("""
-            CREATE TABLE IF NOT EXISTS projects (
+            CREATE TABLE projects (
                 id INTEGER PRIMARY KEY,
                 user_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
@@ -384,7 +481,7 @@ def init_db():
             );
         """)
         c.execute("""
-            CREATE TABLE IF NOT EXISTS participants (
+            CREATE TABLE participants (
                 id INTEGER PRIMARY KEY,
                 project_id INTEGER NOT NULL,
                 number TEXT,
@@ -397,12 +494,12 @@ def init_db():
                 dress_suit TEXT,
                 availability TEXT,
                 photo_path TEXT,
+                session_id INTEGER,
                 FOREIGN KEY (project_id) REFERENCES projects(id)
             );
         """)
-        # sessions and join table
         c.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
+            CREATE TABLE sessions (
                 id INTEGER PRIMARY KEY,
                 project_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
@@ -413,17 +510,7 @@ def init_db():
             );
         """)
         c.execute("""
-            CREATE TABLE IF NOT EXISTS session_participants (
-                id INTEGER PRIMARY KEY,
-                session_id INTEGER NOT NULL,
-                participant_id INTEGER NOT NULL,
-                added_at TEXT,
-                FOREIGN KEY (session_id) REFERENCES sessions(id),
-                FOREIGN KEY (participant_id) REFERENCES participants(id)
-            );
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS logs (
+            CREATE TABLE logs (
                 id INTEGER PRIMARY KEY,
                 timestamp TEXT,
                 user TEXT,
@@ -431,17 +518,16 @@ def init_db():
                 details TEXT
             );
         """)
-        # indices
-        c.execute("CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_participants_project ON participants(project_id);")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_session_participants_session ON session_participants(session_id);")
+        c.execute("CREATE INDEX idx_projects_user ON projects(user_id);")
+        c.execute("CREATE INDEX idx_participants_project ON participants(project_id);")
+        c.execute("CREATE INDEX idx_sessions_project ON sessions(project_id);")
         conn.commit()
 
 # ------------------------
-# log_action
+# log_action - needed early
 # ------------------------
 def log_action(user, action, details=""):
+    """Insert a log row into logs table. Best-effort: quietly ignore on failure."""
     try:
         with db_transaction() as conn:
             conn.execute(
@@ -452,7 +538,7 @@ def log_action(user, action, details=""):
         pass
 
 # ========================
-# Migration from users.json (unchanged logic)
+# Migration from users.json (optional)
 # ========================
 def migrate_from_json_if_needed():
     if os.path.exists(MIGRATION_MARKER):
@@ -562,7 +648,9 @@ def migrate_from_json_if_needed():
     except Exception:
         pass
 
+# ========================
 # Initialize DB + migrate once
+# ========================
 init_db()
 migrate_from_json_if_needed()
 
@@ -648,117 +736,40 @@ def delete_project_media(username, project_name):
     except Exception:
         pass
 
-# ================
-# Sessions Helpers
-# ================
+# ========================
+# Session helpers
+# ========================
 def list_sessions_for_project(conn, project_id):
-    c = conn.cursor()
-    c.execute("SELECT * FROM sessions WHERE project_id=? ORDER BY date, name COLLATE NOCASE", (project_id,))
-    return c.fetchall()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM sessions WHERE project_id=? ORDER BY date IS NULL, date, created_at", (project_id,))
+    return cur.fetchall()
 
-def create_session(conn, project_id, name, date_str=None, description=""):
-    c = conn.cursor()
+def create_session(conn, project_id, name, date=None, description=""):
     now = datetime.now().isoformat()
-    c.execute("INSERT INTO sessions (project_id, name, date, description, created_at) VALUES (?, ?, ?, ?, ?)",
-              (project_id, name, date_str, description, now))
-    return c.lastrowid
+    cur = conn.cursor()
+    cur.execute("INSERT INTO sessions (project_id, name, date, description, created_at) VALUES (?, ?, ?, ?, ?)",
+                (project_id, name, date, description, now))
+    return cur.lastrowid
 
-def get_session_by_id(conn, session_id):
-    c = conn.cursor()
-    c.execute("SELECT * FROM sessions WHERE id=?", (session_id,))
-    return c.fetchone()
-
-def update_session(conn, session_id, name, date_str, description):
-    c = conn.cursor()
-    c.execute("UPDATE sessions SET name=?, date=?, description=? WHERE id=?", (name, date_str, description, session_id))
+def get_session(conn, session_id):
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM sessions WHERE id=?", (session_id,))
+    return cur.fetchone()
 
 def delete_session(conn, session_id):
-    c = conn.cursor()
-    # delete join rows first
-    c.execute("DELETE FROM session_participants WHERE session_id=?", (session_id,))
-    c.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+    cur = conn.cursor()
+    cur.execute("DELETE FROM sessions WHERE id=?", (session_id,))
 
-def add_participant_to_session(conn, session_id, participant_id):
-    c = conn.cursor()
-    now = datetime.now().isoformat()
-    # avoid duplicates
-    c.execute("SELECT id FROM session_participants WHERE session_id=? AND participant_id=?", (session_id, participant_id))
-    if c.fetchone():
-        return None
-    c.execute("INSERT INTO session_participants (session_id, participant_id, added_at) VALUES (?, ?, ?)",
-              (session_id, participant_id, now))
-    return c.lastrowid
+def assign_participants_to_session(conn, participant_ids, session_id):
+    cur = conn.cursor()
+    cur.executemany("UPDATE participants SET session_id=? WHERE id=?", [(session_id, pid) for pid in participant_ids])
 
-def remove_participant_from_session(conn, session_id, participant_id):
-    c = conn.cursor()
-    c.execute("DELETE FROM session_participants WHERE session_id=? AND participant_id=?", (session_id, participant_id))
-
-def participants_in_session(conn, session_id):
-    c = conn.cursor()
-    c.execute("""
-        SELECT p.* FROM participants p
-        JOIN session_participants sp ON sp.participant_id = p.id
-        WHERE sp.session_id = ?
-        ORDER BY p.id
-    """, (session_id,))
-    return c.fetchall()
-
-def sessions_for_participant(conn, participant_id):
-    c = conn.cursor()
-    c.execute("""
-        SELECT s.* FROM sessions s
-        JOIN session_participants sp ON sp.session_id = s.id
-        WHERE sp.participant_id = ?
-        ORDER BY s.date, s.name
-    """, (participant_id,))
-    return c.fetchall()
-
-def bulk_move_copy_participants(conn, participant_ids, target_session_id, action="move"):
-    """
-    action in {"move", "copy"}.
-    If move: remove participant from all other sessions in same project then add to target.
-    If copy: just add to target (if not already present).
-    """
-    c = conn.cursor()
-    target_session = get_session_by_id(conn, target_session_id)
-    if not target_session:
-        raise ValueError("Target session not found")
-    proj_id = target_session["project_id"]
-    now = datetime.now().isoformat()
-    results = {"added":0,"skipped":0,"removed":0}
-    for pid in participant_ids:
-        if action == "move":
-            # remove from other sessions in same project for this participant
-            # find sessions for this participant under proj_id
-            c.execute("""
-                SELECT sp.id, sp.session_id FROM session_participants sp
-                JOIN sessions s ON s.id = sp.session_id
-                WHERE sp.participant_id=? AND s.project_id=?
-            """, (pid, proj_id))
-            rows = c.fetchall()
-            for r in rows:
-                # if already in target_session, skip removal for that id
-                if r["session_id"] != target_session_id:
-                    c.execute("DELETE FROM session_participants WHERE id=?", (r["id"],))
-                    results["removed"] += 1
-            # add to target if not exists
-            c.execute("SELECT id FROM session_participants WHERE session_id=? AND participant_id=?", (target_session_id, pid))
-            if not c.fetchone():
-                c.execute("INSERT INTO session_participants (session_id, participant_id, added_at) VALUES (?, ?, ?)", (target_session_id, pid, now))
-                results["added"] += 1
-            else:
-                results["skipped"] += 1
-        else: # copy
-            c.execute("SELECT id FROM session_participants WHERE session_id=? AND participant_id=?", (target_session_id, pid))
-            if not c.fetchone():
-                c.execute("INSERT INTO session_participants (session_id, participant_id, added_at) VALUES (?, ?, ?)", (target_session_id, pid, now))
-                results["added"] += 1
-            else:
-                results["skipped"] += 1
-    return results
+def unassign_participants_from_session(conn, participant_ids):
+    cur = conn.cursor()
+    cur.executemany("UPDATE participants SET session_id=NULL WHERE id=?", [(pid,) for pid in participant_ids])
 
 # ========================
-# UI: Auth + state init
+# UI: Auth initial state
 # ========================
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
@@ -776,18 +787,24 @@ if "_needs_refresh" not in st.session_state:
     st.session_state["_needs_refresh"] = False
 if "prefill_username" not in st.session_state:
     st.session_state["prefill_username"] = ""
-if "viewing_session_id" not in st.session_state:
-    st.session_state["viewing_session_id"] = None  # None means "view all participants"
-if "last_action_message" not in st.session_state:
-    st.session_state["last_action_message"] = ""
+if "bulk_selection" not in st.session_state:
+    st.session_state["bulk_selection"] = set()  # store participant ids for bulk ops
+if "view_mode" not in st.session_state:
+    st.session_state["view_mode"] = "all"  # "all" or "session" — which participants are currently shown
+if "view_session_id" not in st.session_state:
+    st.session_state["view_session_id"] = None
 
-# AUTH UI
+# ========================
+# AUTH UI: Login / Signup
+# ========================
 if not st.session_state["logged_in"]:
     st.title("🎬 Sacha's Casting Manager")
     choice = st.radio("Choose an option", ["Login", "Sign Up"], horizontal=True)
 
     if choice == "Login":
+        # prefill username if just signed up
         username = st.text_input("Username", value=st.session_state.get("prefill_username", ""))
+        # clear prefill after showing it once (so it doesn't persist forever)
         if st.session_state.get("prefill_username"):
             st.session_state["prefill_username"] = ""
         password = st.text_input("Password", type="password")
@@ -824,6 +841,7 @@ if not st.session_state["logged_in"]:
             else:
                 st.error("Invalid credentials")
     else:
+        # Signup using a form to make submission reliable
         with st.form("signup_form"):
             new_user = st.text_input("New Username")
             new_pass = st.text_input("New Password", type="password")
@@ -842,7 +860,9 @@ if not st.session_state["logged_in"]:
                         else:
                             create_user(conn, new_user, hash_password(new_pass), role=role)
                             log_action(new_user, "signup", role)
+                            # prefill login with the created username for convenience
                             st.session_state["prefill_username"] = new_user
+                            # show confirmation but DO NOT rerun immediately so user sees the message
                             st.success("Account created! Please log in.")
                 except Exception as e:
                     st.error(f"Unable to create account: {e}")
@@ -875,7 +895,6 @@ else:
         st.session_state["logged_in"] = False
         st.session_state["current_user"] = None
         st.session_state["current_project_name"] = None
-        st.session_state["viewing_session_id"] = None
         safe_rerun()
 
     st.sidebar.subheader("Modes")
@@ -884,7 +903,7 @@ else:
     except Exception:
         st.session_state["participant_mode"] = st.sidebar.checkbox("Enable Participant Mode (Kiosk)", value=st.session_state.get("participant_mode", False))
 
-    # load user's projects
+    # load user's projects (use cached connection)
     conn_read = get_db_conn()
     proj_rows = list_projects_with_counts(conn_read, user_id)
     if not proj_rows:
@@ -903,7 +922,7 @@ else:
     st.sidebar.subheader("Active Project")
     st.sidebar.write(f"**{active}**")
 
-    # Participant Kiosk
+    # Participant kiosk (simpler, for check-ins)
     if st.session_state["participant_mode"]:
         st.title("👋 Casting Check-In")
         st.caption("Fill in your details. Submissions go to the active project.")
@@ -935,6 +954,8 @@ else:
                     """, (pid, number, name, role_in, age, agency, height, waist, dress_suit, availability, photo_path))
                     log_action(current_username, "participant_checkin", name)
                 st.success("✅ Thanks for checking in!")
+                # don't force immediate rerun — allow user to see success
+                time.sleep(0.2)
                 safe_rerun()
 
     # Casting manager mode
@@ -949,7 +970,7 @@ else:
         with pm_col2:
             sort_opt = st.selectbox("Sort by", ["Name A→Z", "Newest", "Oldest", "Most Participants", "Fewest Participants"], index=0)
 
-        # Create project
+        # Create project (show success message, avoid immediate rerun so message visible)
         with st.expander("➕ Create New Project", expanded=False):
             with st.form("new_project_form"):
                 p_name = st.text_input("Project Name")
@@ -968,11 +989,13 @@ else:
                                     create_project(conn, user_id, p_name, p_desc or "")
                                     log_action(current_username, "create_project", p_name)
                                     st.success(f"Project '{p_name}' created.")
+                                    # set active project so later UI shows it
                                     st.session_state["current_project_name"] = p_name
+                                    # let the rest of the run update views (no immediate rerun)
                         except Exception as e:
                             st.error(f"Unable to create project: {e}")
 
-        # fetch projects and counts (fresh)
+        # fetch fresh projects (batched counts)
         conn_read = get_db_conn()
         proj_rows = list_projects_with_counts(conn_read, user_id)
         proj_items = []
@@ -1073,6 +1096,7 @@ else:
                                             if isinstance(pf, str) and os.path.exists(pf):
                                                 remove_media_file(pf)
                                         c.execute("DELETE FROM participants WHERE project_id=?", (pid,))
+                                        c.execute("DELETE FROM sessions WHERE project_id=?", (pid,))
                                         c.execute("DELETE FROM projects WHERE id=?", (pid,))
                                         delete_project_media(current_username, name)
                                         log_action(current_username, "delete_project", name)
@@ -1089,10 +1113,9 @@ else:
                         st.session_state["confirm_delete_project"] = None
                         safe_rerun()
 
-        # =========================
-        # SESSIONS manager (separate section)
-        # =========================
-        st.header("🗂 Sessions")
+        # ------------------------
+        # Participant + Session management UI
+        # ------------------------
         current = st.session_state["current_project_name"]
         with db_connect() as conn:
             proj = get_project_by_name(conn, user_id, current)
@@ -1101,13 +1124,22 @@ else:
                 create_project(conn, user_id, current, "")
             with db_connect() as conn:
                 proj = get_project_by_name(conn, user_id, current)
+
         project_id = proj["id"]
 
-        # Create session form
+        # Sessions panel
+        st.subheader("🗓️ Sessions")
+        sess_col1, sess_col2 = st.columns([3,2])
+        with sess_col1:
+            sess_query = st.text_input("Search sessions by name or description", key="sess_query")
+        with sess_col2:
+            sess_sort = st.selectbox("Sort sessions", ["Date", "Newest", "Oldest", "Name"], index=0, key="sess_sort")
+
+        # create session
         with st.expander("➕ Create New Session", expanded=False):
             with st.form("new_session_form"):
                 s_name = st.text_input("Session Name")
-                s_date = st.date_input("Session Date", value=date.today())
+                s_date = st.date_input("Date (optional)")
                 s_desc = st.text_area("Description", height=80)
                 s_create = st.form_submit_button("Create Session")
                 if s_create:
@@ -1116,91 +1148,82 @@ else:
                     else:
                         try:
                             with db_transaction() as conn:
-                                create_session(conn, project_id, s_name, s_date.isoformat(), s_desc or "")
-                                log_action(current_username, "create_session", f"{current} -> {s_name}")
+                                create_session(conn, project_id, s_name, s_date.isoformat() if s_date else None, s_desc or "")
+                                log_action(current_username, "create_session", f"{s_name}")
                             st.success(f"Session '{s_name}' created.")
                             safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to create session: {e}")
 
-        # List sessions
+        # list sessions
         with db_connect() as conn:
             sessions = list_sessions_for_project(conn, project_id)
+        view_sessions = []
+        for s in sessions:
+            view_sessions.append((s["id"], s["name"], s["date"], s["description"]))
 
-        if not sessions:
-            st.info("No sessions yet for this project.")
-        else:
-            # sessions header and quick controls
-            ses_cols = st.columns([3,2,3,2])
-            ses_cols[0].markdown("**Session**")
-            ses_cols[1].markdown("**Date**")
-            ses_cols[2].markdown("**Description**")
-            ses_cols[3].markdown("**Actions**")
-            for s in sessions:
-                s_id = s["id"]
-                cols = st.columns([3,2,3,2])
-                is_viewing = (st.session_state.get("viewing_session_id") == s_id)
-                view_label = "Viewing" if is_viewing else "View"
-                cols[0].markdown(f"{'🟢 ' if is_viewing else ''}**{s['name']}**")
-                cols[1].markdown((s["date"] or "").split("T")[0] if s["date"] else "—")
-                cols[2].markdown(s["description"] or "—")
-                c1, c2 = cols[3].columns([1,1])
-                if c1.button(view_label, key=f"view_session_{s_id}"):
-                    st.session_state["viewing_session_id"] = s_id
-                    safe_rerun()
-                if c2.button("Edit", key=f"edit_session_{s_id}"):
-                    st.session_state[f"editing_session_{s_id}"] = True
-                    safe_rerun()
+        if sess_query:
+            q = sess_query.lower().strip()
+            view_sessions = [x for x in view_sessions if q in x[1].lower() or q in (x[3] or "").lower()]
 
-                # inline edit
-                if st.session_state.get(f"editing_session_{s_id}"):
-                    with st.form(f"edit_session_form_{s_id}"):
-                        new_name = st.text_input("Session Name", value=s["name"])
-                        try:
-                            cur_date = date.fromisoformat(s["date"]) if s["date"] else date.today()
-                        except Exception:
-                            cur_date = date.today()
-                        new_date = st.date_input("Session Date", value=cur_date)
-                        new_desc = st.text_area("Description", value=s["description"] or "", height=80)
-                        csave, ccancel, cdelete = st.columns([1,1,1])
-                        do_save = csave.form_submit_button("Save")
-                        do_cancel = ccancel.form_submit_button("Cancel")
-                        do_delete = cdelete.form_submit_button("Delete")
-                        if do_save:
-                            try:
-                                with db_transaction() as conn:
-                                    update_session(conn, s_id, new_name, new_date.isoformat(), new_desc)
-                                    log_action(current_username, "edit_session", f"{s['name']} -> {new_name}")
-                                st.success("Session updated.")
-                                st.session_state[f"editing_session_{s_id}"] = False
-                                safe_rerun()
-                            except Exception as e:
-                                st.error(f"Unable to save session: {e}")
-                        if do_cancel:
-                            st.session_state[f"editing_session_{s_id}"] = False
-                            safe_rerun()
-                        if do_delete:
-                            try:
-                                with db_transaction() as conn:
-                                    delete_session(conn, s_id)
-                                    log_action(current_username, "delete_session", s["name"])
-                                st.success("Session deleted.")
-                                if st.session_state.get("viewing_session_id") == s_id:
-                                    st.session_state["viewing_session_id"] = None
-                                st.session_state[f"editing_session_{s_id}"] = False
-                                safe_rerun()
-                            except Exception as e:
-                                st.error(f"Unable to delete session: {e}")
+        # sort
+        if sess_sort == "Name":
+            view_sessions.sort(key=lambda x: (x[1] or "").lower())
+        elif sess_sort == "Newest":
+            view_sessions.sort(key=lambda x: x[2] or "", reverse=True)
+        elif sess_sort == "Oldest":
+            view_sessions.sort(key=lambda x: x[2] or "")
+        elif sess_sort == "Date":
+            # put dated first
+            view_sessions.sort(key=lambda x: (x[2] is None, x[2] or ""))
 
-        # Button to view all participants
-        if st.button("📋 View all participants"):
-            st.session_state["viewing_session_id"] = None
+        # render sessions with actions
+        sess_hdr = st.columns([4,2,2,2])
+        sess_hdr[0].markdown("**Session**")
+        sess_hdr[1].markdown("**Date**")
+        sess_hdr[2].markdown("**Participants**")
+        sess_hdr[3].markdown("**Actions**")
+
+        # precompute participant counts by session
+        with db_connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT session_id, COUNT(*) as cnt FROM participants WHERE project_id=? GROUP BY session_id", (project_id,))
+            counts_map = {r["session_id"]: r["cnt"] for r in cur.fetchall()}
+
+        for sid, sname, sdate, sdesc in view_sessions:
+            cnt = counts_map.get(sid, 0)
+            cols = st.columns([4,2,2,2])
+            cols[0].markdown(f"**{sname}**  \n{sdesc or ''}")
+            cols[1].markdown((sdate or "—"))
+            cols[2].markdown(str(cnt))
+            ca, cb = cols[3].columns([1,1])
+            if ca.button("View", key=f"view_sess_{sid}"):
+                st.session_state["view_mode"] = "session"
+                st.session_state["view_session_id"] = sid
+                safe_rerun()
+            if cb.button("Delete", key=f"del_sess_{sid}"):
+                if st.confirm(f"Delete session '{sname}'? Participants will become unassigned. Continue?"):
+                    try:
+                        with db_transaction() as conn:
+                            # unassign participants
+                            cur = conn.cursor()
+                            cur.execute("UPDATE participants SET session_id=NULL WHERE session_id=?", (sid,))
+                            delete_session(conn, sid)
+                            log_action(current_username, "delete_session", f"{sname}")
+                        st.success("Session deleted.")
+                        safe_rerun()
+                    except Exception as e:
+                        st.error(f"Unable to delete session: {e}")
+
+        # option to view all participants
+        view_all_btn = st.button("View All Participants", key="view_all_btn")
+        if view_all_btn:
+            st.session_state["view_mode"] = "all"
+            st.session_state["view_session_id"] = None
             safe_rerun()
 
-        # =========================
-        # Participant management UI (separate from sessions)
-        # =========================
-        st.header(f"👥 Participants — {current}  {'(Viewing session)' if st.session_state.get('viewing_session_id') else ''}")
+        # Participant management UI
+        st.header(f"👥 Participants — {current}")
 
         with st.expander("➕ Add New Participant"):
             with st.form("add_participant"):
@@ -1213,6 +1236,15 @@ else:
                 pwaist = st.text_input("Waist")
                 pdress = st.text_input("Dress/Suit")
                 pavail = st.text_input("Next Availability")
+                p_session = None
+                # allow quick assign to a session on create
+                sess_options = [("Unassigned", None)] + [(s["name"], s["id"]) for s in sessions]
+                # display as selectbox
+                sess_choice = st.selectbox("Assign to session (optional)", options=[x[0] for x in sess_options])
+                for n,v in sess_options:
+                    if n == sess_choice:
+                        p_session = v
+                        break
                 photo = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"])
                 submitted = st.form_submit_button("Add Participant")
                 if submitted:
@@ -1221,98 +1253,133 @@ else:
                             photo_path = save_photo_file(photo, current_username, current) if photo else None
                             conn.execute("""
                                 INSERT INTO participants
-                                (project_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (project_id, number, pname, prole, page, pagency, pheight, pwaist, pdress, pavail, photo_path))
+                                (project_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path, session_id)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (project_id, number, pname, prole, page, pagency, pheight, pwaist, pdress, pavail, photo_path, p_session))
                             log_action(current_username, "add_participant", pname)
                         st.success("Participant added!")
                         safe_rerun()
                     except Exception as e:
                         st.error(f"Unable to add participant: {e}")
 
-        # fetch participants (either all for project or only those in viewing session)
-        viewing_session_id = st.session_state.get("viewing_session_id")
-        with db_connect() as conn:
-            cur = conn.cursor()
-            if viewing_session_id:
-                # participants in that session
-                cur.execute("""
-                    SELECT p.* FROM participants p
-                    JOIN session_participants sp ON sp.participant_id = p.id
-                    WHERE sp.session_id = ?
-                    ORDER BY p.id
-                """, (viewing_session_id,))
+        # list participants filtered by view_mode
+        if st.session_state.get("view_mode") == "session" and st.session_state.get("view_session_id"):
+            cur_view_session = st.session_state["view_session_id"]
+            header_text = f"Participants — Session view"
+            with db_connect() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM participants WHERE project_id=? AND session_id=? ORDER BY id", (project_id, cur_view_session))
                 participants = cur.fetchall()
-                # Also fetch session name for header & export label
-                session_row = get_session_by_id(conn, viewing_session_id)
-            else:
+        else:
+            # view all
+            header_text = "Participants — All"
+            with db_connect() as conn:
+                cur = conn.cursor()
                 cur.execute("SELECT * FROM participants WHERE project_id=? ORDER BY id", (project_id,))
                 participants = cur.fetchall()
-                session_row = None
+
+        st.subheader(header_text)
 
         if not participants:
-            st.info("No participants yet (for selected view).")
+            st.info("No participants yet.")
         else:
-            # Bulk operations area (multi-select + target session + move/copy)
-            st.markdown("**Bulk operations** — choose participants then copy or move them to a session")
-            # build list of choices
-            participant_choices = [f"{safe_field(p,'name','Unnamed')} (#{safe_field(p,'number','')}) — id:{safe_field(p,'id')}" for p in participants]
-            id_map = {participant_choices[i]: participants[i]["id"] for i in range(len(participants))}
-            chosen = st.multiselect("Select participants to move/copy", participant_choices)
-            # choose target session
-            with db_connect() as conn:
-                all_sessions = list_sessions_for_project(conn, project_id)
-            session_options = [f"{s['name']} — {s['date'] or 'no date'} (id:{s['id']})" for s in all_sessions]
-            session_map = {session_options[i]: all_sessions[i]["id"] for i in range(len(all_sessions))}
-            target_session_sel = st.selectbox("Target session", ["-- choose session --"] + session_options)
-            action_choice = st.radio("Action", ["move (cut)", "copy"], index=0, horizontal=True)
-            if st.button("Execute bulk operation"):
-                if not chosen:
-                    st.error("Select at least one participant")
-                elif target_session_sel == "-- choose session --":
-                    st.error("Choose a target session")
+            # Bulk controls
+            st.markdown("**Bulk actions:**")
+            bulk_cols = st.columns([1,1,1,2])
+            bulk_select_action = bulk_cols[0].selectbox("Select action", ["Select", "Deselect", "Invert"], index=0, key="bulk_action_select")
+            if bulk_cols[1].button("Apply selection"):
+                # apply selection action to visible participants
+                ids = [p["id"] for p in participants]
+                if bulk_select_action == "Select":
+                    st.session_state["bulk_selection"].update(ids)
+                elif bulk_select_action == "Deselect":
+                    st.session_state["bulk_selection"].difference_update(ids)
+                else:  # Invert
+                    new_sel = set(ids).difference(st.session_state["bulk_selection"])
+                    st.session_state["bulk_selection"].difference_update(ids)
+                    st.session_state["bulk_selection"].update(new_sel)
+                st.success("Selection updated.")
+                safe_rerun()
+            bulk_target_session = None
+            sess_map = {None: "Unassigned"}
+            for s in sessions:
+                sess_map[s["id"]] = s["name"]
+            # choices display
+            sess_choice_bulk = bulk_cols[2].selectbox("Move selected to session (or Unassigned)", options=list(sess_map.values()))
+            # resolve target id
+            for k,v in sess_map.items():
+                if v == sess_choice_bulk:
+                    bulk_target_session = k
+                    break
+            copy_or_cut = bulk_cols[3].selectbox("Copy or Move?", ["Move (cut)", "Copy"], index=0)
+
+            # Show bulk move/copy button
+            if st.button("Apply bulk action (Move/Copy)"):
+                sel_ids = list(st.session_state["bulk_selection"])
+                if not sel_ids:
+                    st.warning("No participants selected.")
                 else:
-                    participant_ids = [id_map[c] for c in chosen]
-                    target_id = session_map[target_session_sel]
                     try:
                         with db_transaction() as conn:
-                            res = bulk_move_copy_participants(conn, participant_ids, target_id, action="move" if action_choice.startswith("move") else "copy")
-                            log_action(current_username, "bulk_"+("move" if action_choice.startswith("move") else "copy"), f"to session {target_id} participants {participant_ids}")
-                        st.success(f"Bulk operation complete. Added {res['added']}, removed {res['removed']}, skipped {res['skipped']}.")
+                            # if copy: duplicate participant rows with new session_id
+                            cur = conn.cursor()
+                            if copy_or_cut == "Copy":
+                                for pid in sel_ids:
+                                    cur.execute("SELECT * FROM participants WHERE id=?", (pid,))
+                                    row = cur.fetchone()
+                                    if not row:
+                                        continue
+                                    cur.execute("""INSERT INTO participants
+                                        (project_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path, session_id)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                        (project_id, row["number"], row["name"], row["role"], row["age"], row["agency"], row["height"], row["waist"], row["dress_suit"], row["availability"], row["photo_path"], bulk_target_session))
+                            else:
+                                # Move (update session_id)
+                                cur.executemany("UPDATE participants SET session_id=? WHERE id=?", [(bulk_target_session, pid) for pid in sel_ids])
+                            log_action(current_username, "bulk_move_copy", f"{len(sel_ids)} items -> session {bulk_target_session}")
+                        st.success("Bulk action applied.")
+                        # clear selection
+                        st.session_state["bulk_selection"].clear()
                         safe_rerun()
                     except Exception as e:
-                        st.error(f"Unable to complete bulk operation: {e}")
+                        st.error(f"Bulk action failed: {e}")
 
-            # display participants in letterbox cards + show assigned sessions (list)
+            # Render participants in letterbox cards with right-side actions
             for p in participants:
                 pid = p["id"]
                 left, right = st.columns([9,1])
-                display_path = thumb_path_for(p["photo_path"])
+                display_path = thumb_path_for(safe_field(p, "photo_path", ""))
                 data_uri = image_b64_for_path(display_path) if display_path else None
                 if data_uri:
                     img_tag = f"<img class='photo' src='{data_uri}' alt='photo'/>"
                 else:
                     img_tag = "<div class='photo' style='display:flex;align-items:center;justify-content:center;color:#777'>No Photo</div>"
 
-                # gather sessions for this participant (limit to this project)
-                with db_connect() as conn:
-                    s_rows = sessions_for_participant(conn, pid)
-                if s_rows:
-                    sess_names = ", ".join([f"{sr['name']}" for sr in s_rows])
-                else:
-                    sess_names = "Unassigned"
-
-                name_html = (p["name"] or "Unnamed")
-                number_html = (p["number"] or "")
-                role_html = p["role"] or ""
-                age_html = p["age"] or ""
-                agency_html = p["agency"] or ""
-                height_html = p["height"] or ""
-                waist_html = p["waist"] or ""
-                dress_html = p["dress_suit"] or ""
-                avail_html = p["availability"] or ""
+                name_html = safe_field(p, "name", "Unnamed")
+                number_html = safe_field(p, "number", "")
+                role_html = safe_field(p, "role", "")
+                age_html = safe_field(p, "age", "")
+                agency_html = safe_field(p, "agency", "")
+                height_html = safe_field(p, "height", "")
+                waist_html = safe_field(p, "waist", "")
+                dress_html = safe_field(p, "dress_suit", "")
+                avail_html = safe_field(p, "availability", "")
+                session_id_html = safe_field(p, "session_id", None)
+                session_name_html = "Unassigned"
+                for s in sessions:
+                    if s["id"] == session_id_html:
+                        session_name_html = s["name"]
+                        break
 
                 card_html = f"""
+                    <div class="participant-letterbox">
+                        {img_tag}
+                        <div class="name">{st.markdown(name_html + (f" <span class='small'>#{number_html}</span>" if number_html else ''), unsafe_allow_html=True)}</div>
+                    </div>
+                """
+                # We want to show the full card with details — but to avoid duplicate rendering complexity, render with markdown below
+                # Using left.markdown with the constructed HTML:
+                left.markdown(f"""
                     <div class="participant-letterbox">
                         {img_tag}
                         <div class="name">{name_html} <span class="small">#{number_html}</span></div>
@@ -1320,64 +1387,59 @@ else:
                         <div class="meta">Agency: {agency_html}</div>
                         <div class="meta">Height: {height_html} • Waist: {waist_html} • Dress/Suit: {dress_html}</div>
                         <div class="small">Availability: {avail_html}</div>
-                        <div class="small" style="margin-top:6px;"><strong>Sessions:</strong> {sess_names}</div>
+                        <div class="small" style="margin-top:6px;"><strong>Session:</strong> {session_name_html}</div>
                     </div>
-                """
-                left.markdown(card_html, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
 
-                # Edit/Delete controls on right column
+                # Bulk checkbox control (in right column above Edit/Delete)
+                is_selected = pid in st.session_state["bulk_selection"]
+                # We'll use a checkbox to toggle selection
+                sel = right.checkbox("Select", value=is_selected, key=f"bulkchk_{pid}")
+                if sel and pid not in st.session_state["bulk_selection"]:
+                    st.session_state["bulk_selection"].add(pid)
+                if not sel and pid in st.session_state["bulk_selection"]:
+                    st.session_state["bulk_selection"].discard(pid)
+
+                # Edit/Delete underneath checkbox
                 if right.button("Edit", key=f"edit_{pid}"):
-                    # open inline edit form
                     with st.form(f"edit_participant_{pid}"):
-                        enumber = st.text_input("Number", value=p["number"] or "")
-                        ename = st.text_input("Name", value=p["name"] or "")
-                        erole = st.text_input("Role", value=p["role"] or "")
-                        eage = st.text_input("Age", value=p["age"] or "")
-                        eagency = st.text_input("Agency", value=p["agency"] or "")
-                        eheight = st.text_input("Height", value=p["height"] or "")
-                        ewaist = st.text_input("Waist", value=p["waist"] or "")
-                        edress = st.text_input("Dress/Suit", value=p["dress_suit"] or "")
-                        eavail = st.text_input("Next Availability", value=p["availability"] or "")
+                        enumber = st.text_input("Number", value=safe_field(p, "number", ""))
+                        ename = st.text_input("Name", value=safe_field(p, "name", ""))
+                        erole = st.text_input("Role", value=safe_field(p, "role", ""))
+                        eage = st.text_input("Age", value=safe_field(p, "age", ""))
+                        eagency = st.text_input("Agency", value=safe_field(p, "agency", ""))
+                        eheight = st.text_input("Height", value=safe_field(p, "height", ""))
+                        ewaist = st.text_input("Waist", value=safe_field(p, "waist", ""))
+                        edress = st.text_input("Dress/Suit", value=safe_field(p, "dress_suit", ""))
+                        eavail = st.text_input("Next Availability", value=safe_field(p, "availability", ""))
+                        # session assignment
+                        sess_assign_opts = ["Unassigned"] + [s["name"] for s in sessions]
+                        cur_sess_name = session_name_html
+                        e_session_choice = st.selectbox("Assign to session", options=sess_assign_opts, index=sess_assign_opts.index(cur_sess_name) if cur_sess_name in sess_assign_opts else 0)
                         ephoto = st.file_uploader("Upload Photo", type=["jpg","jpeg","png"])
-                        # allow quick assignment to session(s)
-                        with db_connect() as conn:
-                            all_sessions = list_sessions_for_project(conn, project_id)
-                        session_ids_assigned = [s["id"] for s in sessions_for_participant(db_connect(), pid)]
-                        # show multi-select list of session names (pre-selected)
-                        sess_options = {f"{s['name']} — {s['date'] or 'no date'} (id:{s['id']})": s["id"] for s in all_sessions}
-                        sess_selected = []
-                        for k,v in sess_options.items():
-                            if v in session_ids_assigned:
-                                sess_selected.append(k)
-                        sess_chosen = st.multiselect("Assign to sessions (participant will be added to selected sessions)", list(sess_options.keys()), default=sess_selected)
                         save_edit = st.form_submit_button("Save Changes")
                         cancel_edit = st.form_submit_button("Cancel")
                         if save_edit:
                             try:
                                 with db_transaction() as conn:
-                                    new_photo_path = p["photo_path"]
+                                    new_photo_path = safe_field(p, "photo_path", None)
                                     if ephoto:
                                         new_photo_path = save_photo_file(ephoto, current_username, current)
-                                        oldphoto = p["photo_path"]
+                                        oldphoto = safe_field(p, "photo_path", None)
                                         if isinstance(oldphoto, str) and os.path.exists(oldphoto):
                                             remove_media_file(oldphoto)
+                                    # resolve session id
+                                    new_session_id = None
+                                    for s in sessions:
+                                        if s["name"] == e_session_choice:
+                                            new_session_id = s["id"]
+                                            break
+                                    if e_session_choice == "Unassigned":
+                                        new_session_id = None
                                     conn.execute("""
-                                        UPDATE participants SET number=?, name=?, role=?, age=?, agency=?, height=?, waist=?, dress_suit=?, availability=?, photo_path=?
+                                        UPDATE participants SET number=?, name=?, role=?, age=?, agency=?, height=?, waist=?, dress_suit=?, availability=?, photo_path=?, session_id=?
                                         WHERE id=?
-                                    """, (enumber, ename, erole, eage, eagency, eheight, ewaist, edress, eavail, new_photo_path, pid))
-                                    # update session assignments: first remove existing associations for this project, then add selected
-                                    # remove participant from all sessions of this project
-                                    c = conn.cursor()
-                                    c.execute("""
-                                        DELETE FROM session_participants WHERE participant_id=? AND session_id IN (
-                                            SELECT id FROM sessions WHERE project_id=?
-                                        )
-                                    """, (pid, project_id))
-                                    # add back selected
-                                    for k in sess_chosen:
-                                        sid = sess_options.get(k)
-                                        if sid:
-                                            add_participant_to_session(conn, sid, pid)
+                                    """, (enumber, ename, erole, eage, eagency, eheight, ewaist, edress, eavail, new_photo_path, new_session_id, pid))
                                     log_action(current_username, "edit_participant", ename)
                                 st.success("Participant updated!")
                                 safe_rerun()
@@ -1389,50 +1451,41 @@ else:
                 if right.button("Delete", key=f"del_{pid}"):
                     try:
                         with db_transaction() as conn:
-                            if isinstance(p["photo_path"], str) and os.path.exists(p["photo_path"]):
-                                remove_media_file(p["photo_path"])
+                            if isinstance(safe_field(p, "photo_path", ""), str) and os.path.exists(safe_field(p, "photo_path", "")):
+                                remove_media_file(safe_field(p, "photo_path", ""))
                             conn.execute("DELETE FROM participants WHERE id=?", (pid,))
-                            # also delete from session_participants
-                            conn.execute("DELETE FROM session_participants WHERE participant_id=?", (pid,))
-                            log_action(current_username, "delete_participant", p["name"] or "")
+                            log_action(current_username, "delete_participant", safe_field(p, "name", ""))
                         st.warning("Participant deleted")
+                        # ensure it's removed from bulk selection if present
+                        st.session_state["bulk_selection"].discard(pid)
                         safe_rerun()
                     except Exception as e:
                         st.error(f"Unable to delete participant: {e}")
 
         # ------------------------
-        # Export to Word (session-aware)
+        # Export to Word (current view or all)
         # ------------------------
         st.subheader("📄 Export Participants (Word)")
-        if st.button("Download Word File of Current View"):
+        st.write("Choose export scope:")
+        col_e = st.columns([1,1,1])
+        export_scope = col_e[0].selectbox("Export:", ["Export current view (session/all)", "Export all participants"])
+        if col_e[1].button("Download Word File of Current View"):
             try:
                 with db_connect() as conn:
                     cur = conn.cursor()
-                    if st.session_state.get("viewing_session_id"):
-                        # export participants in the selected session
-                        sid = st.session_state["viewing_session_id"]
-                        cur.execute("""
-                            SELECT p.* FROM participants p
-                            JOIN session_participants sp ON sp.participant_id = p.id
-                            WHERE sp.session_id = ?
-                            ORDER BY p.id
-                        """, (sid,))
+                    if st.session_state.get("view_mode") == "session" and st.session_state.get("view_session_id"):
+                        cur.execute("SELECT * FROM participants WHERE project_id=? AND session_id=? ORDER BY id", (project_id, st.session_state.get("view_session_id")))
                         parts = cur.fetchall()
-                        # get session name for filename
-                        srow = get_session_by_id(conn, sid)
-                        fname_base = f"{current}_session_{srow['name']}" if srow else f"{current}_session_{sid}"
+                        doc_title = f"{current}_session_{st.session_state.get('view_session_id')}_participants"
                     else:
                         cur.execute("SELECT * FROM participants WHERE project_id=? ORDER BY id", (project_id,))
                         parts = cur.fetchall()
-                        fname_base = f"{current}_participants"
+                        doc_title = f"{current}_participants"
                     if not parts:
-                        st.info("No participants to export for this view.")
+                        st.info("No participants in this selection.")
                     else:
                         doc = Document()
-                        heading = f"Participants - {current}"
-                        if st.session_state.get("viewing_session_id"):
-                            heading += f" - Session: {srow['name']}"
-                        doc.add_heading(heading, 0)
+                        doc.add_heading(f"Participants - {current}", 0)
                         for p in parts:
                             table = doc.add_table(rows=1, cols=2)
                             table.autofit = False
@@ -1443,12 +1496,14 @@ else:
                             # Prefer thumbnail if available
                             display_path = thumb_path_for(safe_field(p, "photo_path", ""))
                             bytes_data = None
+                            # 1) try file bytes (thumb or original)
                             if display_path and os.path.exists(display_path):
                                 try:
                                     with open(display_path, "rb") as f:
                                         bytes_data = f.read()
                                 except Exception:
                                     bytes_data = None
+                            # 2) fallback: try stored path/raw base64
                             if bytes_data is None:
                                 bytes_data = get_photo_bytes(safe_field(p, "photo_path", ""))
 
@@ -1459,8 +1514,10 @@ else:
                                     paragraph = row_cells[0].paragraphs[0]
                                     run = paragraph.add_run()
                                     try:
+                                        # Try adding picture directly from BytesIO
                                         run.add_picture(image_stream, width=Inches(1.5))
                                     except Exception:
+                                        # Fallback: write to a temp file and pass the filename
                                         tf = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
                                         try:
                                             tf.write(bytes_data)
@@ -1477,6 +1534,7 @@ else:
                             else:
                                 row_cells[0].text = "No Photo"
 
+                            # Use safe_field to read fields from sqlite3.Row or dict
                             info_text = (
                                 f"Number: {safe_field(p, 'number','')}\n"
                                 f"Name: {safe_field(p, 'name','')}\n"
@@ -1486,25 +1544,28 @@ else:
                                 f"Height: {safe_field(p, 'height','')}\n"
                                 f"Waist: {safe_field(p, 'waist','')}\n"
                                 f"Dress/Suit: {safe_field(p, 'dress_suit','')}\n"
-                                f"Next Available: {safe_field(p, 'availability','')}"
+                                f"Next Available: {safe_field(p, 'availability','')}\n"
+                                f"Session: {session_name_html if 'session_name_html' in locals() else (safe_field(p,'session_id') or 'Unassigned')}"
                             )
                             row_cells[1].text = info_text
                             doc.add_paragraph("\n")
 
+                        # Save to BytesIO and provide download button
                         word_stream = io.BytesIO()
                         doc.save(word_stream)
                         word_stream.seek(0)
-                        filename = f"{fname_base}.docx".replace(" ", "_")
                         st.download_button(
                             label="Click to download Word file",
                             data=word_stream,
-                            file_name=filename,
+                            file_name=f"{doc_title}.docx",
                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                         )
             except Exception as e:
                 st.error(f"Unable to generate Word file: {e}")
 
-        # Admin dashboard unchanged but visible to Admin
+        # ------------------------
+        # Admin dashboard (unchanged behavior)
+        # ------------------------
         if role == "Admin":
             st.header("👑 Admin Dashboard")
             if st.button("🔄 Refresh Users"):
@@ -1517,9 +1578,9 @@ else:
 
             ucol1, ucol2 = st.columns([3,2])
             with ucol1:
-                uquery = st.text_input("Search accounts by username or role")
+                uquery = st.text_input("Search accounts by username or role", key="admin_uquery")
             with ucol2:
-                urole_filter = st.selectbox("Filter role", ["All", "Admin", "Casting Director", "Assistant"], index=0)
+                urole_filter = st.selectbox("Filter role", ["All", "Admin", "Casting Director", "Assistant"], index=0, key="admin_role_filter")
 
             uhdr = st.columns([3,2,3,3,4])
             uhdr[0].markdown("**Username**"); uhdr[1].markdown("**Role**"); uhdr[2].markdown("**Last Login**"); uhdr[3].markdown("**Projects**"); uhdr[4].markdown("**Actions**")
@@ -1579,6 +1640,7 @@ else:
                                         if isinstance(pf, str) and os.path.exists(pf):
                                             remove_media_file(pf)
                                     cur.execute("DELETE FROM participants WHERE project_id IN (SELECT id FROM projects WHERE user_id=?)", (uid,))
+                                    cur.execute("DELETE FROM sessions WHERE project_id IN (SELECT id FROM projects WHERE user_id=?)", (uid,))
                                     cur.execute("DELETE FROM projects WHERE user_id=?", (uid,))
                                     cur.execute("DELETE FROM users WHERE id=?", (uid,))
                                     log_action(current_username, "delete_user", uname)

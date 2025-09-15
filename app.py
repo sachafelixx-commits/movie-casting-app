@@ -1,3 +1,74 @@
+
+def ensure_schema_and_admin(conn):
+    """Ensure required tables exist and permanent admin account is present."""
+    import hashlib
+    from datetime import datetime
+    cur = conn.cursor()
+    # Create tables if missing
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    if not cur.fetchone():
+        schema = """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL,
+            last_login TEXT
+        );
+        CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS participants (
+            id INTEGER PRIMARY KEY,
+            project_id INTEGER NOT NULL,
+            number TEXT,
+            name TEXT,
+            role TEXT,
+            age TEXT,
+            agency TEXT,
+            height TEXT,
+            waist TEXT,
+            dress_suit TEXT,
+            availability TEXT,
+            photo_path TEXT,
+            session_id INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY,
+            project_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            date TEXT,
+            description TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT,
+            user TEXT,
+            action TEXT,
+            details TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
+        CREATE INDEX IF NOT EXISTS idx_participants_project ON participants(project_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+        """
+        cur.executescript(schema)
+        conn.commit()
+    # Ensure admin user exists
+    cur.execute("SELECT id FROM users WHERE username=?", ("admin",))
+    if not cur.fetchone():
+        pw = hashlib.sha256("supersecret".encode()).hexdigest()
+        now = datetime.now().isoformat()
+        cur.execute(
+            "INSERT INTO users (username, password, role, last_login) VALUES (?, ?, ?, ?)",
+            ("admin", pw, "Admin", now)
+        )
+        conn.commit()
+
 # sachas_casting_manager_sqlite_sessions_speedup_full.py
 # Full app: Sacha's Casting Manager (SQLite) — optimized for speed, thumbnails, sessions, bulk move/copy.
 # IMPORTANT: This file is intended to replace your existing Streamlit app file. It preserves previous features
@@ -1738,6 +1809,7 @@ else:
                             safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to delete user: {e}")
+
 
 
 

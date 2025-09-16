@@ -1677,44 +1677,64 @@ else:
 
             st.markdown("**Restore database from .db file (overwrites current DB)**")
             st.write("Upload a valid SQLite `.db` file to replace the current database. This action will overwrite the existing data. A confirmation is required.")
-            uploaded = st.file_uploader("Upload .db file to restore", type=["db"])
-            if uploaded is not None:
-                st.warning("⚠️ Restore will overwrite the current database file.")
-                confirm = st.checkbox("I understand this will overwrite the current database. Proceed with restore.", key="confirm_restore_checkbox")
-                if confirm:
-                    if st.button("Restore Database Now"):
-                        try:
-                            # read uploaded bytes
-                            data_bytes = uploaded.read()
-                            # write to a temporary file first, then atomically replace
-                            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".db")
-                            os.close(tmp_fd)
-                            with open(tmp_path, "wb") as tf:
-                                tf.write(data_bytes)
-                                tf.flush()
-                                os.fsync(tf.fileno())
-                            # backup existing DB before replace (optional safety copy)
-                            try:
-                                if os.path.exists(DB_FILE):
-                                    backup_path = f"{DB_FILE}.bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                                    shutil.copy2(DB_FILE, backup_path)
-                            except Exception:
-                                pass
-                            # replace
-                            os.replace(tmp_path, DB_FILE)
-                            # clear cached DB connection so new file is used
-                            try:
-                                st.cache_resource.clear()
-                            except Exception:
-                                # fallback: attempt to delete the cached function attribute
-                                pass
-                            log_action(current_username, "restore_database", f"restored_by={current_username}")
-                            st.success("Database restored successfully. The app will reload to use the restored DB.")
-                            safe_rerun()
-                        except Exception as e:
-                            st.error(f"Restore failed: {e}")
+            # ----------------- Replace your existing restore block with this -----------------
+uploaded = st.file_uploader("Upload .db file to restore", type=["db"])
+if uploaded is not None:
+    st.warning("⚠️ Restore will overwrite the current database file.")
+    confirm = st.checkbox("I understand this will overwrite the current database. Proceed with restore.", key="confirm_restore_checkbox")
+    if confirm:
+        if st.button("Restore Database Now"):
+            try:
+                # read uploaded bytes
+                data_bytes = uploaded.read()
+                # ensure the DB directory exists
+                db_dir = os.path.dirname(os.path.abspath(DB_FILE)) or "."
+                os.makedirs(db_dir, exist_ok=True)
 
-            st.markdown("---")
-            st.write("Note: Schema edits are not supported from this UI. Use a separate DB tool for advanced schema changes.")
+                # create temp file in same directory as DB_FILE so os.replace() can rename across filesystems
+                tf = None
+                tmp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(dir=db_dir, prefix="restore_tmp_", suffix=".db", delete=False) as tf:
+                        tmp_path = tf.name
+                        tf.write(data_bytes)
+                        tf.flush()
+                        os.fsync(tf.fileno())
+                except Exception as e:
+                    # fallback: write to a temp file anywhere and then copy into place
+                    # but prefer to fail loudly so admin can fix permissions
+                    raise RuntimeError(f"Failed to write temporary DB file in database directory: {e}")
 
+                # make a timestamped backup of existing DB (best-effort)
+                try:
+                    if os.path.exists(DB_FILE):
+                        backup_path = f"{DB_FILE}.bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                        shutil.copy2(DB_FILE, backup_path)
+                except Exception:
+                    # ignore backup errors but continue (we already have tmp file)
+                    pass
 
+                # atomically replace
+                try:
+                    os.replace(tmp_path, DB_FILE)  # tmp_path is in same dir as DB_FILE so this should succeed
+                except Exception as e:
+                    # cleanup the temp file if replace failed
+                    try:
+                        if tmp_path and os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
+                    raise
+
+                # clear cached DB connection so new file is used
+                try:
+                    st.cache_resource.clear()
+                except Exception:
+                    pass
+
+                log_action(current_username, "restore_database", f"restored_by={current_username}")
+                st.success("Database restored successfully. The app will reload to use the restored DB.")
+                safe_rerun()
+
+            except Exception as e:
+                st.error(f"Restore failed: {e}")

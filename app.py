@@ -1,4 +1,4 @@
-# fixed_sacha_casting_manager.py
+# sacha_casting_manager_with_hardcoded_admin.py
 import streamlit as st
 import sqlite3
 import json
@@ -851,39 +851,6 @@ def show_login_signup():
                 except Exception as e:
                     st.error(f"Unable to create account: {e}")
 
-def show_first_run_admin_setup():
-    """Renders a one-time form for the initial admin account creation."""
-    st.title("🎬 First-Run Setup: Create Administrator Account")
-    st.info("This is a one-time setup. Please create your primary administrator account.")
-    
-    with st.form("admin_setup_form"):
-        new_admin_user = st.text_input("Administrator Username")
-        new_admin_pass = st.text_input("Administrator Password", type="password")
-        confirm_admin_pass = st.text_input("Confirm Administrator Password", type="password")
-        
-        setup_btn = st.form_submit_button("Create Admin Account")
-        
-        if setup_btn:
-            if not new_admin_user or not new_admin_pass:
-                st.error("Username and password are required.")
-            elif new_admin_pass != confirm_admin_pass:
-                st.error("Passwords do not match.")
-            else:
-                try:
-                    with db_transaction() as conn:
-                        existing = get_user_by_username(conn, new_admin_user)
-                        if existing:
-                            st.error("Username already exists. Please choose another.")
-                        else:
-                            create_user(conn, new_admin_user, hash_password(new_admin_pass), role="Admin")
-                            log_action(new_admin_user, "initial_admin_setup", "created_first_admin")
-                            st.session_state["prefill_username"] = new_admin_user
-                            st.session_state["first_run_admin"] = False
-                            st.success("Admin account created! Please log in.")
-                            safe_rerun()
-                except Exception as e:
-                    st.error(f"Unable to create admin account: {e}")
-
 def show_participant_kiosk(user_id, current_username, active_project_name):
     """Renders the simplified UI for participant check-ins."""
     st.title("👋 Casting Check-In")
@@ -1489,6 +1456,18 @@ def main():
     init_db()
     migrate_from_json_if_needed()
 
+    # --- Ensure default admin exists (username: admin, password: supersecret) ---
+    try:
+        with db_transaction() as conn:
+            existing_admin = get_user_by_username(conn, "admin")
+            if not existing_admin:
+                create_user(conn, "admin", hash_password("supersecret"), role="Admin")
+                log_action("system", "create_admin_auto", "Created default admin account")
+    except Exception:
+        # best-effort; don't crash startup if logging fails
+        pass
+    # -------------------------------------------------------------------------
+
     # Initialize session state variables
     if "logged_in" not in st.session_state:
         st.session_state["logged_in"] = False
@@ -1520,15 +1499,9 @@ def main():
         st.session_state["confirm_delete_session_id"] = None
     if "confirm_delete_user" not in st.session_state:
         st.session_state["confirm_delete_user"] = None
-    if "first_run_admin" not in st.session_state:
-        conn = db_connect()
-        admin_users = conn.execute("SELECT id FROM users WHERE role = 'Admin'").fetchall()
-        conn.close()
-        st.session_state["first_run_admin"] = len(admin_users) == 0
 
-    if st.session_state.get("first_run_admin"):
-        show_first_run_admin_setup()
-    elif not st.session_state["logged_in"]:
+    # If not logged in, show login/signup (no one-time admin setup page)
+    if not st.session_state["logged_in"]:
         show_login_signup()
     else:
         current_username = st.session_state["current_user"]

@@ -1,3 +1,4 @@
+# fixed_sacha_casting_manager.py
 import streamlit as st
 import sqlite3
 import json
@@ -9,7 +10,7 @@ import uuid
 import shutil
 import re
 import tempfile
-from datetime import datetime
+from datetime import datetime, date
 from docx import Document
 from docx.shared import Inches
 from PIL import Image, UnidentifiedImageError
@@ -44,7 +45,7 @@ st.markdown("""
 /* Participant letter-box card */
 .participant-letterbox {
   max-width: 520px;
-border-radius: 10px;
+  border-radius: 10px;
   border: 1px solid rgba(0,0,0,0.06);
   padding: 8px;
   margin-bottom: 12px;
@@ -78,27 +79,25 @@ border-radius: 10px;
 /* Grid layout for larger screens: left column card, right small action column */
 .part-row {
   display:flex;
-gap:12px;
+  gap:12px;
   align-items:flex-start;
   margin-bottom: 10px;
 }
 
 /* Responsive */
 @media (max-width: 900px) {
- .participant-letterbox.photo { height: 160px;
-}
+ .participant-letterbox.photo { height: 160px; }
 }
 @media (max-width: 600px) {
  .participant-letterbox { max-width: 100%; padding: 6px; }
- .participant-letterbox.photo { height: 140px;
-}
+ .participant-letterbox.photo { height: 140px; }
  .part-row { flex-direction: column; }
 }
 
 /* Buttons slightly larger for touch */
 .stButton>button, button {
-  padding:.55rem.9rem!important;
-font-size: 0.98rem!important;
+  padding:.55rem .9rem!important;
+  font-size: 0.98rem!important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -115,7 +114,7 @@ def _sanitize_for_path(s: str) -> str:
 
 def hash_password(password: str) -> str:
     """Hash a password using SHA256.
-Note: For production, consider a stronger, salt-based hash like bcrypt."""
+    Note: For production, consider a stronger, salt-based hash like bcrypt."""
     return hashlib.sha256(password.encode()).hexdigest()
 
 def ensure_media_dir():
@@ -138,7 +137,7 @@ def looks_like_base64_image(s: str) -> bool:
 def safe_field(row_or_dict, key, default=""):
     """
     Safely get a field from sqlite3.Row or a dict-like object.
-Returns default for missing/None values.
+    Returns default for missing/None values.
     """
     if row_or_dict is None:
         return default
@@ -278,7 +277,10 @@ def save_photo_file(uploaded_file, username: str, project_name: str, make_thumb=
                 data = data.encode("utf-8")
             f.write(data)
             f.flush()
-            os.fsync(f.fileno())
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
         
         # create thumbnail next to original (jpg)
         if make_thumb:
@@ -286,7 +288,8 @@ def save_photo_file(uploaded_file, username: str, project_name: str, make_thumb=
                 buf = io.BytesIO(data)
                 img = Image.open(buf)
                 img.thumbnail(thumb_size)
-                thumb_name = f"{os.path.splitext(filename)}_thumb.jpg"
+                base_name = os.path.splitext(filename)[0]
+                thumb_name = f"{base_name}_thumb.jpg"
                 thumb_path = os.path.join(user_dir, thumb_name)
                 img.convert("RGB").save(thumb_path, format="JPEG", quality=THUMB_QUALITY)
             except Exception:
@@ -329,13 +332,17 @@ def save_photo_bytes(bytes_data: bytes, username: str, project_name: str, ext_hi
         with open(path, "wb") as f:
             f.write(bytes_data)
             f.flush()
-            os.fsync(f.fileno())
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
         # create thumbnail
         try:
             buf2 = io.BytesIO(bytes_data)
             img = Image.open(buf2)
             img.thumbnail(THUMB_SIZE)
-            thumb_name = f"{os.path.splitext(filename)}_thumb.jpg"
+            base_name = os.path.splitext(filename)[0]
+            thumb_name = f"{base_name}_thumb.jpg"
             thumb_path = os.path.join(user_dir, thumb_name)
             img.convert("RGB").save(thumb_path, format="JPEG", quality=THUMB_QUALITY)
         except Exception:
@@ -349,7 +356,15 @@ def remove_media_file(path: str):
     try:
         if not path:
             return
-        if isinstance(path, str) and os.path.exists(path) and os.path.commonpath() == os.path.abspath(MEDIA_DIR):
+        if isinstance(path, str) and os.path.exists(path):
+            # ensure path is under MEDIA_DIR
+            try:
+                common = os.path.commonpath([os.path.abspath(path), os.path.abspath(MEDIA_DIR)])
+            except Exception:
+                common = ""
+            if common != os.path.abspath(MEDIA_DIR):
+                # safety: don't delete files outside media dir
+                return
             os.remove(path)
             # also try removing thumbnail if exists
             base, _ = os.path.splitext(path)
@@ -361,7 +376,7 @@ def remove_media_file(path: str):
                 pass
             # cleanup empty dirs up to MEDIA_DIR
             parent = os.path.dirname(path)
-            while parent and os.path.abspath(parent)!= os.path.abspath(MEDIA_DIR):
+            while parent and os.path.abspath(parent) != os.path.abspath(MEDIA_DIR):
                 try:
                     if not os.listdir(parent):
                         os.rmdir(parent)
@@ -510,7 +525,7 @@ def init_db():
 
 def log_action(user, action, details=""):
     """Insert a log row into logs table.
-Best-effort: quietly ignore on failure."""
+    Best-effort: quietly ignore on failure."""
     try:
         with db_transaction() as conn:
             conn.execute(
@@ -562,7 +577,7 @@ def migrate_from_json_if_needed():
                 pw = info.get("password") or ""
                 role = info.get("role") or "Casting Director"
                 last_login = info.get("last_login")
-                if pw and len(pw)!= 64:
+                if pw and len(pw) != 64:
                     pw = hash_password(pw)
                 
                 # IMPORTANT: Admin backdoor from older versions removed for security
@@ -580,7 +595,7 @@ def migrate_from_json_if_needed():
                 if user_id:
                     projects = info.get("projects", {}) or {}
                     if not isinstance(projects, dict) or not projects:
-                        projects = {DEFAULT_PROJECT_NAME: {"description":"", "created_at": datetime.now().isoformat(), "participants":}}
+                        projects = {DEFAULT_PROJECT_NAME: {"description":"", "created_at": datetime.now().isoformat(), "participants":[]}}
                     
                     for pname, pblock in projects.items():
                         if not isinstance(pblock, dict):
@@ -596,7 +611,9 @@ def migrate_from_json_if_needed():
                             prow = c.fetchone()
                             project_id = prow["id"] if prow else None
                         if project_id:
-                            participants = pblock.get("participants",) or
+                            participants = pblock.get("participants") or []
+                            if not isinstance(participants, (list, tuple)):
+                                participants = []
                             for entrant in participants:
                                 if not isinstance(entrant, dict):
                                     continue
@@ -786,7 +803,7 @@ def delete_user_data(conn, user_id, username):
 def show_login_signup():
     """Renders the login/signup UI."""
     st.title("🎬 Sacha's Casting Manager")
-    choice = st.radio("Choose an option",, horizontal=True)
+    choice = st.radio("Choose an option", ("Login", "Sign Up"), horizontal=True)
 
     if choice == "Login":
         username = st.text_input("Username", value=st.session_state.get("prefill_username", ""))
@@ -815,7 +832,7 @@ def show_login_signup():
         with st.form("signup_form"):
             new_user = st.text_input("New Username")
             new_pass = st.text_input("New Password", type="password")
-            role = st.selectbox("Role",)
+            role = st.selectbox("Role", ("Casting Director", "Admin"))
             signup_btn = st.form_submit_button("Sign Up")
         if signup_btn:
             if not new_user or not new_pass:
@@ -849,7 +866,7 @@ def show_first_run_admin_setup():
         if setup_btn:
             if not new_admin_user or not new_admin_pass:
                 st.error("Username and password are required.")
-            elif new_admin_pass!= confirm_admin_pass:
+            elif new_admin_pass != confirm_admin_pass:
                 st.error("Passwords do not match.")
             else:
                 try:
@@ -885,7 +902,7 @@ def show_participant_kiosk(user_id, current_username, active_project_name):
         photo = st.file_uploader("Upload Photo", type=["jpg", "jpeg", "png"])
         submitted = st.form_submit_button("Submit")
     if submitted:
-        with st.status("Submitting...", expanded=True) as status:
+        with st.spinner("Submitting..."):
             try:
                 with db_transaction() as conn:
                     proj = get_project_by_name(conn, user_id, active_project_name)
@@ -893,20 +910,16 @@ def show_participant_kiosk(user_id, current_username, active_project_name):
                         pid = create_project(conn, user_id, active_project_name, "")
                     else:
                         pid = proj["id"]
-                    status.update(label="Saving photo...")
                     photo_path = save_photo_file(photo, current_username, active_project_name) if photo else None
-                    status.update(label="Saving participant details...")
                     conn.execute("""
                         INSERT INTO participants (project_id, number, name, role, age, agency, height, waist, dress_suit, availability, photo_path)
                         VALUES (?,?,?,?,?,?,?,?,?,?,?)
                     """, (pid, number, name, role_in, age, agency, height, waist, dress_suit, availability, photo_path))
                     log_action(current_username, "participant_checkin", name)
-                status.update(label="✅ Thanks for checking in!", state="complete", expanded=False)
-                st.toast("Submission successful!")
+                st.success("Submission successful!")
                 time.sleep(0.5)
                 safe_rerun()
             except Exception as e:
-                status.update(label="Submission failed.", state="error", expanded=False)
                 st.error(f"Error submitting: {e}")
 
 def project_manager_ui(user_id, current_username):
@@ -940,9 +953,10 @@ def project_manager_ui(user_id, current_username):
     # Project List
     conn_read = get_db_conn()
     proj_rows = list_projects_with_counts(conn_read, user_id)
+    # Project items as (name, desc, created_at, count)
     proj_items = [(r["name"], r["description"], r["created_at"], r["participant_count"]) for r in proj_rows]
 
-    pm_col1, pm_col2 = st.columns()
+    pm_col1, pm_col2 = st.columns(2)
     with pm_col1:
         query = st.text_input("Search projects by name or description")
     with pm_col2:
@@ -950,34 +964,34 @@ def project_manager_ui(user_id, current_username):
 
     if query:
         q = query.lower().strip()
-        proj_items = [x for x in proj_items if q in x.lower() or q in (x[1] or "").lower()]
+        proj_items = [x for x in proj_items if q in (x[0] or "").lower() or q in (x[1] or "").lower()]
     
     if sort_opt == "Name A→Z":
-        proj_items.sort(key=lambda x: x.lower())
+        proj_items.sort(key=lambda x: (x[0] or "").lower())
     elif sort_opt == "Newest":
-        proj_items.sort(key=lambda x: x, reverse=True)
+        proj_items.sort(key=lambda x: (x[2] or ""), reverse=True)
     elif sort_opt == "Oldest":
-        proj_items.sort(key=lambda x: x)
+        proj_items.sort(key=lambda x: (x[2] or ""))
     elif sort_opt == "Most Participants":
-        proj_items.sort(key=lambda x: x, reverse=True)
+        proj_items.sort(key=lambda x: int(x[3] or 0), reverse=True)
     elif sort_opt == "Fewest Participants":
-        proj_items.sort(key=lambda x: x)
+        proj_items.sort(key=lambda x: int(x[3] or 0))
 
-    hdr = st.columns()
-    hdr.markdown("**Project**")
-    hdr.[1]markdown("**Description**")
-    hdr.markdown("**Created**")
-    hdr.markdown("**Participants**")
-    hdr.markdown("**Actions**")
+    hdr = st.columns(5)
+    hdr[0].markdown("**Project**")
+    hdr[1].markdown("**Description**")
+    hdr[2].markdown("**Created**")
+    hdr[3].markdown("**Participants**")
+    hdr[4].markdown("**Actions**")
 
     for name, desc, created, count in proj_items:
         is_active = (name == st.session_state.get("current_project_name"))
-        cols = st.columns()
-        cols.markdown(f"{'🟢 ' if is_active else ''}**{name}**")
-        cols.[1]markdown(desc or "—")
-        cols.markdown((created or "").split("T"))
-        cols.markdown(str(count))
-        a1, a2, a3 = cols.columns([1,1,1])
+        cols = st.columns(5)
+        cols[0].markdown(f"{'🟢 ' if is_active else ''}**{name}**")
+        cols[1].markdown(desc or "—")
+        cols[2].markdown((created or "").split("T")[0] if created else "—")
+        cols[3].markdown(str(count))
+        a1, a2, a3 = cols[4].columns([1,1,1])
         if a1.button("Set Active", key=f"setactive_{name}"):
             st.session_state["current_project_name"] = name
             safe_rerun()
@@ -1031,12 +1045,11 @@ def project_manager_ui(user_id, current_username):
                 cancel_delete = d2.form_submit_button("Cancel")
                 if do_delete:
                     if confirm_text == name:
-                        with st.status("Deleting project and all media...", expanded=True) as status:
+                        with st.spinner("Deleting project and all media..."):
                             try:
                                 with db_transaction() as conn:
                                     proj = get_project_by_name(conn, user_id, name)
                                     if not proj:
-                                        status.update(label="Project not found.", state="error")
                                         st.error("Project not found")
                                     else:
                                         pid = proj["id"]
@@ -1053,15 +1066,13 @@ def project_manager_ui(user_id, current_username):
                                         delete_project_media(current_username, name)
                                         log_action(current_username, "delete_project", name)
                                        
-                                        status.update(label=f"Project '{name}' deleted.", state="complete", expanded=False)
+                                        st.success(f"Project '{name}' deleted.")
                                         if st.session_state.get("current_project_name") == name:
                                             st.session_state["current_project_name"] = None
                                         st.session_state["confirm_delete_project"] = None
-                                        st.toast("Project deleted successfully!")
                                         time.sleep(0.5)
                                         safe_rerun()
                             except Exception as e:
-                                status.update(label="Deletion failed.", state="error")
                                 st.error(f"Unable to delete project: {e}")
                     else:
                         st.error("Project name mismatch. Not deleted.")
@@ -1074,7 +1085,7 @@ def participant_manager_ui(project_id, user_id, current_username, current_projec
     st.header("👥 Participants")
     
     # Bulk actions and filtering
-    col1, col2 = st.columns()
+    col1, col2 = st.columns(2)
     with col1:
         p_query = st.text_input("Search participants by name, role, etc.")
     with col2:
@@ -1121,21 +1132,23 @@ def participant_manager_ui(project_id, user_id, current_username, current_projec
         participant_rows = [r for r in participant_rows if q in safe_field(r, "name").lower() or q in safe_field(r, "role").lower() or q in safe_field(r, "number").lower()]
 
     # Bulk actions UI
-    if st.session_state["bulk_selection"]:
+    if st.session_state.get("bulk_selection"):
         st.info(f"{len(st.session_state['bulk_selection'])} participants selected.")
         bulk_col1, bulk_col2, bulk_col3, bulk_col4 = st.columns(4)
         with bulk_col1:
-            bulk_target_session_name = st.selectbox("Assign to Session", options= + [s["name"] for s in sess_rows])
+            session_names = ["(Select Session)"] + [s["name"] for s in sess_rows]
+            bulk_target_session_name = st.selectbox("Assign to Session", options=session_names)
         with bulk_col2:
             if st.button("Assign Selected"):
-                if bulk_target_session_name!= "(Select Session)":
+                if bulk_target_session_name != "(Select Session)":
                     with db_transaction() as conn:
                         sess_row = conn.execute("SELECT id FROM sessions WHERE name=? AND project_id=?", (bulk_target_session_name, project_id)).fetchone()
                         if sess_row:
                             assign_participants_to_session(conn, list(st.session_state["bulk_selection"]), sess_row["id"])
+                            num_assigned = len(st.session_state["bulk_selection"])
                             st.session_state["bulk_selection"] = set()
-                            st.success(f"{len(st.session_state['bulk_selection'])} participants assigned.")
-                            log_action(current_username, "bulk_assign", f"{len(st.session_state['bulk_selection'])} to {bulk_target_session_name}")
+                            st.success(f"{num_assigned} participants assigned.")
+                            log_action(current_username, "bulk_assign", f"{num_assigned} to {bulk_target_session_name}")
                             safe_rerun()
                 else:
                     st.warning("Please select a session.")
@@ -1143,9 +1156,10 @@ def participant_manager_ui(project_id, user_id, current_username, current_projec
             if st.button("Unassign Selected"):
                 with db_transaction() as conn:
                     unassign_participants_from_session(conn, list(st.session_state["bulk_selection"]))
+                num_unassigned = len(st.session_state["bulk_selection"])
                 st.session_state["bulk_selection"] = set()
                 st.success("Participants unassigned.")
-                log_action(current_username, "bulk_unassign", f"{len(st.session_state['bulk_selection'])} unassigned")
+                log_action(current_username, "bulk_unassign", f"{num_unassigned} unassigned")
                 safe_rerun()
 
     # Participant list with photo cards
@@ -1156,17 +1170,17 @@ def participant_manager_ui(project_id, user_id, current_username, current_projec
         for r in participant_rows:
             photo_path = r["photo_path"]
             thumb = thumb_path_for(photo_path)
-            b64_img = image_b64_for_path(thumb)
-            is_selected = r["id"] in st.session_state["bulk_selection"]
+            b64_img = image_b64_for_path(thumb) if thumb else None
+            is_selected = r["id"] in st.session_state.get("bulk_selection", set())
             
-            with st.container(border=True):
-                col_sel, col_content, col_actions = st.columns()
+            with st.container():
+                col_sel, col_content, col_actions = st.columns([1, 4, 2])
                 with col_sel:
                     checkbox_state = st.checkbox("Select", value=is_selected, key=f"bulk_select_{r['id']}")
                     if checkbox_state:
-                        st.session_state["bulk_selection"].add(r["id"])
+                        st.session_state.setdefault("bulk_selection", set()).add(r["id"])
                     elif not checkbox_state and is_selected:
-                        st.session_state["bulk_selection"].discard(r["id"])
+                        st.session_state.setdefault("bulk_selection", set()).discard(r["id"])
                         safe_rerun()
 
                 with col_content:
@@ -1206,7 +1220,7 @@ def participant_manager_ui(project_id, user_id, current_username, current_projec
                     update_btn = st.form_submit_button("Update Participant")
                     cancel_btn = st.form_submit_button("Cancel")
                     if update_btn:
-                        with st.status("Updating...", expanded=True) as status:
+                        with st.spinner("Updating..."):
                             try:
                                 with db_transaction() as conn:
                                     conn.execute("""
@@ -1214,13 +1228,11 @@ def participant_manager_ui(project_id, user_id, current_username, current_projec
                                         WHERE id=?
                                     """, (new_number, new_name, new_role, new_age, new_agency, new_height, new_waist, new_dress_suit, new_availability, r["id"]))
                                     log_action(current_username, "edit_participant", new_name)
-                                status.update(label="✅ Participant updated.", state="complete", expanded=False)
+                                st.success("Participant updated.")
                                 st.session_state["editing_participant_id"] = None
-                                st.toast("Participant updated!")
                                 time.sleep(0.5)
                                 safe_rerun()
                             except Exception as e:
-                                status.update(label="Update failed.", state="error", expanded=False)
                                 st.error(f"Failed to update participant: {e}")
                     if cancel_btn:
                         st.session_state["editing_participant_id"] = None
@@ -1230,19 +1242,17 @@ def participant_manager_ui(project_id, user_id, current_username, current_projec
                 st.warning(f"Are you sure you want to delete {safe_field(r,'name')}? This cannot be undone.")
                 c1, c2 = st.columns(2)
                 if c1.button("Confirm Delete", key=f"confirm_del_part_{r['id']}"):
-                    with st.status("Deleting...", expanded=True) as status:
+                    with st.spinner("Deleting..."):
                         try:
                             with db_transaction() as conn:
                                 remove_media_file(r["photo_path"])
                                 conn.execute("DELETE FROM participants WHERE id=?", (r["id"],))
                                 log_action(current_username, "delete_participant", safe_field(r, 'name'))
-                            status.update(label=f"Participant {safe_field(r,'name')} deleted.", state="complete", expanded=False)
+                            st.success(f"Participant {safe_field(r,'name')} deleted.")
                             st.session_state["confirm_delete_participant_id"] = None
-                            st.toast("Participant deleted!")
                             time.sleep(0.5)
                             safe_rerun()
                         except Exception as e:
-                            status.update(label="Deletion failed.", state="error", expanded=False)
                             st.error(f"Failed to delete participant: {e}")
                 if c2.button("Cancel", key=f"cancel_del_part_{r['id']}"):
                     st.session_state["confirm_delete_participant_id"] = None
@@ -1280,28 +1290,28 @@ def session_manager_ui(project_id, current_username):
     conn_read = get_db_conn()
     sess_rows = list_sessions_for_project(conn_read, project_id)
     
-    sess_col1, sess_col2 = st.columns()
+    sess_col1, sess_col2 = st.columns(2)
     with sess_col1:
         sess_query = st.text_input("Search sessions by name or description", key="sess_query")
     with sess_col2:
-        sess_sort = st.selectbox("Sort sessions",, index=0, key="sess_sort")
+        sess_sort = st.selectbox("Sort sessions", ("Name", "Newest", "Oldest", "Date"), index=0, key="sess_sort")
 
     sess_items = [(r["id"], r["name"], r["date"], r["description"], r["created_at"]) for r in sess_rows]
 
     if sess_query:
         q = sess_query.lower().strip()
-        sess_items = [x for x in sess_items if q in x.[1]lower() or q in (x or "").lower()]
+        sess_items = [x for x in sess_items if q in (x[1] or "").lower() or q in (x[3] or "").lower()]
 
     if sess_sort == "Name":
-        sess_items.sort(key=lambda x: x.[1]lower())
+        sess_items.sort(key=lambda x: (x[1] or "").lower())
     elif sess_sort == "Newest":
-        sess_items.sort(key=lambda x: x, reverse=True)
+        sess_items.sort(key=lambda x: (x[4] or ""), reverse=True)
     elif sess_sort == "Oldest":
-        sess_items.sort(key=lambda x: x)
+        sess_items.sort(key=lambda x: (x[4] or ""))
     elif sess_sort == "Date":
         # Sort by date, with NULL dates at the end
         def date_sort_key(item):
-            dt_str = item
+            dt_str = item[2]
             if not dt_str:
                 return (1, "")
             return (0, dt_str)
@@ -1313,13 +1323,13 @@ def session_manager_ui(project_id, current_username):
         st.info("No sessions found for this project.")
     else:
         for sess_id, sess_name, sess_date, sess_desc, sess_created in sess_items:
-            with st.container(border=True):
-                s_cols = st.columns()
-                s_cols.markdown(f"**{sess_name}**")
-                s_cols.[1]markdown(sess_desc or "—")
-                s_cols.markdown(sess_date.split("T") if sess_date else "—")
+            with st.container():
+                s_cols = st.columns(4)
+                s_cols[0].markdown(f"**{sess_name}**")
+                s_cols[1].markdown(sess_desc or "—")
+                s_cols[2].markdown(sess_date.split("T")[0] if sess_date else "—")
                 
-                a1, a2, a3 = s_cols.columns([1,1,1])
+                a1, a2, a3 = s_cols[3].columns([1,1,1])
                 if a1.button("View", key=f"view_sess_{sess_id}"):
                     st.session_state["view_mode"] = "session"
                     st.session_state["view_session_id"] = sess_id
@@ -1331,7 +1341,7 @@ def session_manager_ui(project_id, current_username):
                     cur.execute("SELECT * FROM participants WHERE session_id=?", (sess_id,))
                     participants = cur.fetchall()
                     if participants:
-                        export_participants_to_word(participants, current_username, st.session_state["current_project_name"])
+                        export_participants_to_word(participants, current_username, st.session_state.get("current_project_name", ""))
                     else:
                         st.info("No participants in this session to export.")
                 if a3.button("Delete", key=f"del_sess_{sess_id}"):
@@ -1344,19 +1354,18 @@ def session_manager_ui(project_id, current_username):
                 st.warning(f"Are you sure you want to delete the session **{sess_name}**?")
                 c1, c2 = st.columns(2)
                 if c1.button("Confirm Delete", key=f"conf_del_sess_{sess_id}"):
-                    with st.status("Deleting session...", expanded=True) as status:
+                    with st.spinner("Deleting session..."):
                         try:
                             with db_transaction() as conn:
-                                unassign_participants_from_session(conn, [r["id"] for r in sess_rows if r["id"] == sess_id])
+                                # unassign participants from this session
+                                conn.execute("UPDATE participants SET session_id=NULL WHERE session_id=?", (sess_id,))
                                 delete_session(conn, sess_id)
                                 log_action(current_username, "delete_session", sess_name)
-                            status.update(label="✅ Session deleted.", state="complete", expanded=False)
+                            st.success("✅ Session deleted.")
                             st.session_state["confirm_delete_session_id"] = None
-                            st.toast("Session deleted!")
                             time.sleep(0.5)
                             safe_rerun()
                         except Exception as e:
-                            status.update(label="Deletion failed.", state="error", expanded=False)
                             st.error(f"Failed to delete session: {e}")
                 if c2.button("Cancel", key=f"cancel_del_sess_{sess_id}"):
                     st.session_state["confirm_delete_session_id"] = None
@@ -1375,12 +1384,12 @@ def admin_dashboard_ui():
         uname = user_row["username"]
         role = user_row["role"]
         
-        cols = st.columns()
-        cols.markdown(f"**{uname}**")
-        cols.[1]markdown(role)
+        cols = st.columns(3)
+        cols[0].markdown(f"**{uname}**")
+        cols[1].markdown(role)
         
-        if uname!= st.session_state["current_user"]:
-            if cols.button("Delete User", key=f"delete_user_{uname}"):
+        if uname != st.session_state.get("current_user"):
+            if cols[2].button("Delete User", key=f"delete_user_{uname}"):
                 st.session_state["confirm_delete_user"] = uname
                 safe_rerun()
     
@@ -1389,20 +1398,18 @@ def admin_dashboard_ui():
         st.warning(f"Are you sure you want to delete user **{uname}**? This will delete all of their projects, participants, and media. This cannot be undone.")
         c1, c2 = st.columns(2)
         if c1.button("Confirm Delete User", key="final_del_user"):
-            with st.status("Deleting user and all data...", expanded=True) as status:
+            with st.spinner("Deleting user and all data..."):
                 try:
                     with db_transaction() as conn:
                         user_to_delete = conn.execute("SELECT id FROM users WHERE username=?", (uname,)).fetchone()
                         if user_to_delete and delete_user_data(conn, user_to_delete["id"], uname):
-                            log_action(st.session_state["current_user"], "delete_user", uname)
+                            log_action(st.session_state.get("current_user", "unknown"), "delete_user", uname)
                         
-                    status.update(label=f"User {uname} deleted.", state="complete", expanded=False)
+                    st.success(f"User {uname} deleted.")
                     st.session_state["confirm_delete_user"] = None
-                    st.toast("User deleted!")
                     time.sleep(0.5)
                     safe_rerun()
                 except Exception as e:
-                    status.update(label="Deletion failed.", state="error", expanded=False)
                     st.error(f"Unable to delete user: {e}")
         if c2.button("Cancel", key="cancel_del_user"):
             st.session_state["confirm_delete_user"] = None
@@ -1431,9 +1438,9 @@ def export_participants_to_word(participants, current_username, current_project_
             # Add participant details in a table
             table = doc.add_table(rows=1, cols=2)
             table.style = 'Table Grid'
-            hdr_cells = table.rows.cells
-            hdr_cells.text = 'Field'
-            hdr_cells.[1]text = 'Value'
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = 'Field'
+            hdr_cells[1].text = 'Value'
             
             fields = {
                 "Number": safe_field(p, 'number'),
@@ -1449,8 +1456,8 @@ def export_participants_to_word(participants, current_username, current_project_
             for field, value in fields.items():
                 if value:
                     row_cells = table.add_row().cells
-                    row_cells.text = field
-                    row_cells.[1]text = value
+                    row_cells[0].text = field
+                    row_cells[1].text = str(value)
             
             doc.add_page_break()
             
@@ -1462,7 +1469,7 @@ def export_participants_to_word(participants, current_username, current_project_
         # Provide download link
         st.download_button(
             label="Download Word Document",
-            data=bio,
+            data=bio.getvalue(),
             file_name=f"Casting_Report_{datetime.now().strftime('%Y-%m-%d')}.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
@@ -1563,7 +1570,7 @@ def main():
         
         project_names = [r["name"] for r in proj_rows]
         if st.session_state.get("current_project_name") not in project_names:
-            st.session_state["current_project_name"] = project_names if project_names else DEFAULT_PROJECT_NAME
+            st.session_state["current_project_name"] = project_names[0] if project_names else DEFAULT_PROJECT_NAME
         
         active_project_name = st.session_state["current_project_name"]
         
@@ -1572,19 +1579,19 @@ def main():
         st.sidebar.write(f"**{active_project_name}**")
         
         st.sidebar.markdown("---")
-        try:
-            st.session_state["participant_mode"] = st.sidebar.toggle("Enable Kiosk Mode", value=st.session_state.get("participant_mode", False))
-        except Exception:
-            st.session_state["participant_mode"] = st.sidebar.checkbox("Enable Kiosk Mode", value=st.session_state.get("participant_mode", False))
+        st.session_state["participant_mode"] = st.sidebar.checkbox("Enable Kiosk Mode", value=st.session_state.get("participant_mode", False))
 
         if st.session_state["participant_mode"]:
             show_participant_kiosk(user_id, current_username, active_project_name)
         else:
             st.title("🎬 Sacha's Casting Manager")
             
-            tabs = st.tabs( + ( if role == "Admin" else))
+            tab_labels = ["Projects", "Participants", "Sessions", "Export"]
+            if role == "Admin":
+                tab_labels.append("Admin")
+            tabs = st.tabs(tab_labels)
             
-            with tabs:
+            with tabs[0]:
                 project_manager_ui(user_id, current_username)
             
             # Re-fetch project ID to ensure it's up to date after potential creation/rename
@@ -1598,12 +1605,12 @@ def main():
             with tabs[1]:
                 participant_manager_ui(project_id, user_id, current_username, active_project_name)
             
-            with tabs:
+            with tabs[2]:
                 session_manager_ui(project_id, current_username)
 
-            with tabs:
+            with tabs[3]:
                 st.header("📄 Export to Word")
-                with st.container(border=True):
+                with st.container():
                     export_all = st.button("Export All Participants in Project")
                     export_session = st.button("Export Participants from Current Session View")
                     if export_all:
@@ -1630,7 +1637,7 @@ def main():
                             st.info("Please select a session to filter participants before exporting.")
 
             if role == "Admin":
-                with tabs:
+                with tabs[-1]:
                     admin_dashboard_ui()
 
 if __name__ == "__main__":

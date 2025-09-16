@@ -1586,3 +1586,135 @@ else:
                             safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to delete user: {e}")
+
+            # ------------------------
+            # Database Manager (Admin-only)
+            # ------------------------
+            st.subheader("🗄️ Database Manager")
+
+            st.markdown("**Browse tables | Schema | Data (paginated)**")
+            # list tables
+            try:
+                with db_connect() as conn:
+                    c = conn.cursor()
+                    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+                    table_rows = c.fetchall()
+                    tables = [r["name"] for r in table_rows]
+            except Exception as e:
+                tables = []
+                st.error(f"Unable to list tables: {e}")
+
+            if not tables:
+                st.info("No tables found in the database.")
+            else:
+                chosen_table = st.selectbox("Select table to inspect", ["-- choose table --"] + tables)
+                if chosen_table and chosen_table != "-- choose table --":
+                    # show schema
+                    try:
+                        with db_connect() as conn:
+                            cur = conn.cursor()
+                            cur.execute(f"PRAGMA table_info('{chosen_table}')")
+                            schema_rows = cur.fetchall()
+                            schema_display = []
+                            for col in schema_rows:
+                                schema_display.append({
+                                    "cid": col["cid"],
+                                    "name": col["name"],
+                                    "type": col["type"],
+                                    "notnull": bool(col["notnull"]),
+                                    "default": col["dflt_value"],
+                                    "pk": bool(col["pk"])
+                                })
+                            st.markdown("**Schema**")
+                            st.table(schema_display)
+                    except Exception as e:
+                        st.error(f"Unable to get schema: {e}")
+
+                    # pagination controls for table data
+                    try:
+                        with db_connect() as conn:
+                            cur = conn.cursor()
+                            count_row = cur.execute(f"SELECT COUNT(*) as c FROM '{chosen_table}'").fetchone()
+                            total_count = count_row["c"] if count_row else 0
+                    except Exception as e:
+                        total_count = 0
+                        st.error(f"Unable to count rows: {e}")
+
+                    per_page = st.number_input("Rows per page", min_value=1, max_value=500, value=30, step=10, key=f"perpage_{chosen_table}")
+                    total_pages = max(1, (total_count + per_page - 1) // per_page)
+                    page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, key=f"page_{chosen_table}")
+                    offset = (page - 1) * per_page
+
+                    # fetch and show page
+                    try:
+                        with db_connect() as conn:
+                            cur = conn.cursor()
+                            cur.execute(f"SELECT * FROM '{chosen_table}' LIMIT ? OFFSET ?", (per_page, offset))
+                            rows = cur.fetchall()
+                            data = [dict(r) for r in rows]
+                            st.markdown(f"**Showing page {page} / {total_pages} — {total_count} rows total**")
+                            st.dataframe(data)
+                    except Exception as e:
+                        st.error(f"Unable to fetch table data: {e}")
+
+            # Backup: download DB file
+            st.markdown("---")
+            st.markdown("**Backup / Restore**")
+            try:
+                if os.path.exists(DB_FILE):
+                    with open(DB_FILE, "rb") as f:
+                        db_bytes = f.read()
+                    st.download_button(
+                        label="📥 Download Database Backup",
+                        data=db_bytes,
+                        file_name=f"data_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+                        mime="application/octet-stream"
+                    )
+                else:
+                    st.info("Database file not found for backup.")
+            except Exception as e:
+                st.error(f"Unable to prepare backup download: {e}")
+
+            st.markdown("**Restore database from .db file (overwrites current DB)**")
+            st.write("Upload a valid SQLite `.db` file to replace the current database. This action will overwrite the existing data. A confirmation is required.")
+            uploaded = st.file_uploader("Upload .db file to restore", type=["db"])
+            if uploaded is not None:
+                st.warning("⚠️ Restore will overwrite the current database file.")
+                confirm = st.checkbox("I understand this will overwrite the current database. Proceed with restore.", key="confirm_restore_checkbox")
+                if confirm:
+                    if st.button("Restore Database Now"):
+                        try:
+                            # read uploaded bytes
+                            data_bytes = uploaded.read()
+                            # write to a temporary file first, then atomically replace
+                            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".db")
+                            os.close(tmp_fd)
+                            with open(tmp_path, "wb") as tf:
+                                tf.write(data_bytes)
+                                tf.flush()
+                                os.fsync(tf.fileno())
+                            # backup existing DB before replace (optional safety copy)
+                            try:
+                                if os.path.exists(DB_FILE):
+                                    backup_path = f"{DB_FILE}.bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                                    shutil.copy2(DB_FILE, backup_path)
+                            except Exception:
+                                pass
+                            # replace
+                            os.replace(tmp_path, DB_FILE)
+                            # clear cached DB connection so new file is used
+                            try:
+                                st.cache_resource.clear()
+                            except Exception:
+                                # fallback: attempt to delete the cached function attribute
+                                pass
+                            log_action(current_username, "restore_database", f"restored_by={current_username}")
+                            st.success("Database restored successfully. The app will reload to use the restored DB.")
+                            safe_rerun()
+                        except Exception as e:
+                            st.error(f"Restore failed: {e}")
+
+            st.markdown("---")
+            st.write("Note: Schema edits are not supported from this UI. Use a separate DB tool for advanced schema changes.")
+
+

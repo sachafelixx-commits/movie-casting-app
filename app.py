@@ -62,7 +62,9 @@ def get_db_conn():
     """
     @st.cache_resource
     def _get_conn():
-        return sqlite3.connect(DB_FILE, check_same_thread=False)
+        conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
     
     return _get_conn()
 
@@ -295,9 +297,8 @@ def export_participants_to_word(participants, username, project_name):
         log_action(username, "export_word", f"Project: {project_name}, Participants: {len(participants)}")
     except Exception as e:
         st.error(f"An error occurred during export: {e}")
-        log_action(username, "export_word_error", f"Project: {project_name}, Error: {e}")
-
-# ==================================
+        log_action(username, "export_word_error", f"Project: {project_name}, Error: {e}")\
+        # ==================================
 # UI Components
 # ==================================
 
@@ -319,7 +320,6 @@ def login_form():
     )
 
     login_form_name = st.radio(" ", ["Login", "Sign Up"])
-    st.session_state['login_form_name'] = login_form_name
     st.markdown("<br><br>", unsafe_allow_html=True)
     
     if login_form_name == "Login":
@@ -332,8 +332,7 @@ def login_form():
                 st.warning("Please enter your username and password.")
             else:
                 st.session_state['authentication_status'] = False
-                login_success = False
-
+                
                 # Check for a temporary "admin backdoor" for the first admin user
                 if username == "admin" and password == "supersecret":
                     conn = get_db_conn()
@@ -350,55 +349,54 @@ def login_form():
                             st.session_state['authentication_status'] = True
                             st.session_state['name'] = 'Admin User'
                             st.session_state['username'] = "admin"
+                            st.session_state['user_role'] = 'Admin'
                             st.success("Admin user created and logged in! Please restart the app for full access.")
+                            safe_rerun()
                         except Exception as e:
                             st.error(f"Failed to create admin user: {e}")
                     else:
                         st.session_state['authentication_status'] = True
                         st.session_state['name'] = 'Admin User'
                         st.session_state['username'] = "admin"
+                        st.session_state['user_role'] = 'Admin'
                         cur.execute("UPDATE users SET role = 'Admin' WHERE username = 'admin'")
                         conn.commit()
                         st.info("Logged in as an existing admin user.")
-                    safe_rerun()
+                        safe_rerun()
                 else:
                     if username in roles and check_password_hash(roles[username], password):
                         st.session_state['authentication_status'] = True
                         st.session_state['username'] = username
                         st.session_state['name'] = roles[username]
-                        login_success = True
+                        st.session_state['user_role'] = roles.get(username, 'Casting Director')
+                        log_action(username, "login", "success")
+                        st.success('Logged in successfully!')
+                        safe_rerun()
                     else:
                         st.session_state['authentication_status'] = False
                         st.error('Username/password is incorrect')
 
-                if login_success:
-                    st.success('Logged in successfully!')
-                    st.session_state['user_role'] = roles.get(username, 'Casting Director')
-                    log_action(username, "login", "success")
-                    safe_rerun()
-    
     elif login_form_name == "Sign Up":
         try:
-            if st.session_state['authentication_status'] is False or st.session_state['authentication_status'] is None:
-                new_username = st.text_input("New Username", key="new_username")
-                new_password = st.text_input("New Password", type="password", key="new_password")
-                
-                if st.button("Create Account"):
-                    if not new_username or not new_password:
-                        st.error("Username and password cannot be empty.")
-                    else:
-                        conn = get_db_conn()
-                        cur = conn.cursor()
-                        hashed_password = generate_password_hash(new_password)
-                        
-                        try:
-                            cur.execute("INSERT INTO users (username, password) VALUES (?, ?)", (new_username, hashed_password))
-                            conn.commit()
-                            log_action(new_username, "signup", "success")
-                            st.success('Account created successfully!')
-                            st.info('Please go to the Login tab to log in.')
-                        except sqlite3.IntegrityError:
-                            st.error('Username already exists. Please choose a different one.')
+            new_username = st.text_input("New Username", key="new_username")
+            new_password = st.text_input("New Password", type="password", key="new_password")
+            
+            if st.button("Create Account"):
+                if not new_username or not new_password:
+                    st.error("Username and password cannot be empty.")
+                else:
+                    conn = get_db_conn()
+                    cur = conn.cursor()
+                    hashed_password = generate_password_hash(new_password)
+                    
+                    try:
+                        cur.execute("INSERT INTO users (username, password) VALUES (?, ?)", (new_username, hashed_password))
+                        conn.commit()
+                        log_action(new_username, "signup", "success")
+                        st.success('Account created successfully!')
+                        st.info('Please go to the Login tab to log in.')
+                    except sqlite3.IntegrityError:
+                        st.error('Username already exists. Please choose a different one.')
         except Exception as e:
             st.error(f"An error occurred during sign up: {e}")
 
@@ -507,9 +505,9 @@ def casting_manager_ui():
     # Main UI
     st.title("Sacha's Casting Manager")
 
-    tabs = ["Projects", "Add Participant", "View Participants", "Export", "Admin Dashboard"]
-    if role != "Admin":
-        tabs.remove("Admin Dashboard")
+    tabs = ["Projects", "Add Participant", "View Participants", "Export"]
+    if role == "Admin":
+        tabs.append("Admin Dashboard")
     
     selected_tab = option_menu(
         menu_title=None,
@@ -791,19 +789,20 @@ def casting_manager_ui():
             else:
                 st.info("Please select a session to export.")
 
-    elif role == "Admin":
-        admin_dashboard_ui()
-
-
-# ==================================
+    elif selected_tab == "Admin Dashboard":
+        if role == "Admin":
+            admin_dashboard_ui()
+        else:
+            st.error("Access Denied: You do not have permission to view this page.")
+            # ==================================
 # Main App Flow
 # ==================================
 def main():
     create_initial_db()
     migrate_users_if_needed()
     
-    conn = get_db_conn()
-    conn.row_factory = sqlite3.Row
+    if 'authentication_status' not in st.session_state:
+        st.session_state['authentication_status'] = None
     
     if st.session_state.get('authentication_status'):
         casting_manager_ui()

@@ -2004,6 +2004,213 @@ if uploaded_zip is not None:
     except Exception as e:
         st.error(f"Error processing uploaded zip: {e}")
 
+# ---------- Admin helper: scan, preview, and restore existing backups ----------
+import fnmatch
+import math
+
+def preview_db_counts(db_path):
+    """Return (users_count, projects_count, participants_count, sample_users) or raise."""
+    users_count = projects_count = participants_count = None
+    sample_users = []
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        try:
+            users_count = cur.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+        except Exception:
+            users_count = None
+        try:
+            projects_count = cur.execute("SELECT COUNT(*) as c FROM projects").fetchone()["c"]
+        except Exception:
+            projects_count = None
+        try:
+            participants_count = cur.execute("SELECT COUNT(*) as c FROM participants").fetchone()["c"]
+        except Exception:
+            participants_count = None
+        try:
+            sample_users = [dict(r) for r in cur.execute("SELECT id, username, role, last_login FROM users ORDER BY id LIMIT 10").fetchall()]
+        except Exception:
+            sample_users = []
+        conn.close()
+        return users_count, projects_count, participants_count, sample_users
+    except Exception as e:
+        raise
+
+db_dir = os.path.dirname(os.path.abspath(DB_FILE)) or "."
+st.markdown("---")
+st.subheader("🕵️‍♂️ Scan & Preview Existing Backups (Admin-only)")
+
+# find files
+files = sorted(os.listdir(db_dir))
+zip_candidates = [f for f in files if fnmatch.fnmatch(f, "site_backup_*.zip")]
+dbbak_candidates = [f for f in files if fnmatch.fnmatch(f, "data.db.bak_*")]
+mediabak_candidates = [f for f in files if fnmatch.fnmatch(f, "media.bak_*")]
+
+st.markdown(f"**Search path:** `{db_dir}`")
+st.write(f"Found {len(zip_candidates)} backup zip(s), {len(dbbak_candidates)} DB .bak file(s), {len(mediabak_candidates)} media .bak(s).")
+
+# Helper UI: show zips with preview
+def preview_zip(zipname):
+    p = os.path.join(db_dir, zipname)
+    st.write(f"**{zipname}** — {round(os.path.getsize(p)/1024.0,1)} KB")
+    # extract data.db to temp inside db_dir
+    tmp_preview_dir = tempfile.mkdtemp(dir=db_dir, prefix="scan_preview_")
+    tmp_zip = None
+    try:
+        with zipfile.ZipFile(p, "r") as zf:
+            namelist = zf.namelist()
+            st.write("Contents (top-level examples):", namelist[:40])
+            if "data.db" in namelist:
+                zf.extract("data.db", path=tmp_preview_dir)
+                extracted_db_path = os.path.join(tmp_preview_dir, "data.db")
+                try:
+                    u,pj,par, sample = preview_db_counts(extracted_db_path)
+                    st.write(f"- Users: **{u}**  Projects: **{pj}** Participants: **{par}**")
+                    if sample:
+                        st.write("Sample users:")
+                        st.table(sample)
+                except Exception as e:
+                    st.error(f"Unable to preview data.db inside zip: {e}")
+            else:
+                st.info("No `data.db` at top-level inside this zip.")
+    except Exception as e:
+        st.error(f"Error reading zip: {e}")
+    finally:
+        try:
+            shutil.rmtree(tmp_preview_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+# Helper UI: show DB bak preview
+def preview_db_bak(bakname):
+    p = os.path.join(db_dir, bakname)
+    st.write(f"**{bakname}** — {round(os.path.getsize(p)/1024.0,1)} KB")
+    try:
+        u,pj,par, sample = preview_db_counts(p)
+        st.write(f"- Users: **{u}**  Projects: **{pj}** Participants: **{par}**")
+        if sample:
+            st.write("Sample users:")
+            st.table(sample)
+    except Exception as e:
+        st.error(f"Unable to preview DB bak: {e}")
+
+# Render lists with preview buttons (and restore action)
+st.markdown("### Zip backups found")
+for z in zip_candidates:
+    with st.expander(z, expanded=False):
+        preview_zip(z)
+        restore_key = f"restore_zip_{z}"
+        if st.button("Restore this backup (overwrite DB + media)", key=restore_key):
+            confirm = st.text_input(f"Type the filename `{z}` to confirm destructive restore:", key=f"confirm_input_{z}")
+            if confirm == z:
+                try:
+                    # perform the same careful restore as earlier
+                    src = os.path.join(db_dir, z)
+                    tmp_zip_path = None
+                    with tempfile.NamedTemporaryFile(dir=db_dir, prefix="restore_zip_", suffix=".zip", delete=False) as tf:
+                        tmp_zip_path = tf.name
+                        with open(src, "rb") as sf:
+                            shutil.copyfileobj(sf, tf)
+                        tf.flush(); os.fsync(tf.fileno())
+                    extract_tmp_dir = tempfile.mkdtemp(dir=db_dir, prefix="restore_extract_")
+                    with zipfile.ZipFile(tmp_zip_path, "r") as zf:
+                        zf.extractall(path=extract_tmp_dir)
+                    # backup current state
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    try:
+                        if os.path.exists(DB_FILE):
+                            shutil.copy2(DB_FILE, f"{DB_FILE}.bak_{ts}")
+                    except Exception:
+                        pass
+                    try:
+                        if os.path.exists(MEDIA_DIR):
+                            try:
+                                os.rename(MEDIA_DIR, f"{MEDIA_DIR}.bak_{ts}")
+                            except Exception:
+                                shutil.copytree(MEDIA_DIR, f"{MEDIA_DIR}.bak_{ts}")
+                    except Exception:
+                        pass
+                    # clear cache
+                    try:
+                        st.cache_resource.clear()
+                    except Exception:
+                        pass
+                    # replace DB if present
+                    extracted_db_path = os.path.join(extract_tmp_dir, "data.db")
+                    if os.path.exists(extracted_db_path):
+                        with tempfile.NamedTemporaryFile(dir=db_dir, prefix="restore_db_", suffix=".db", delete=False) as tf_db:
+                            tmp_db_path = tf_db.name
+                            with open(extracted_db_path, "rb") as ef:
+                                shutil.copyfileobj(ef, tf_db)
+                            tf_db.flush(); os.fsync(tf_db.fileno())
+                        os.replace(tmp_db_path, DB_FILE)
+                    # replace media
+                    extracted_media_dir = os.path.join(extract_tmp_dir, "media")
+                    if os.path.exists(extracted_media_dir):
+                        try:
+                            if os.path.exists(MEDIA_DIR):
+                                shutil.rmtree(MEDIA_DIR)
+                        except Exception:
+                            pass
+                        try:
+                            shutil.move(extracted_media_dir, MEDIA_DIR)
+                        except Exception:
+                            shutil.copytree(extracted_media_dir, MEDIA_DIR)
+                            shutil.rmtree(extracted_media_dir, ignore_errors=True)
+                    shutil.rmtree(extract_tmp_dir, ignore_errors=True)
+                    try:
+                        if os.path.exists(tmp_zip_path):
+                            os.remove(tmp_zip_path)
+                    except Exception:
+                        pass
+                    st.success(f"Restored backup {z}. App will reload.")
+                    log_action(current_username, "restore_from_backup_zip", z)
+                    safe_rerun()
+                except Exception as e:
+                    st.error(f"Restore failed: {e}")
+            else:
+                st.warning("Confirmation text mismatch. Type the exact filename to confirm.")
+
+st.markdown("### data.db.bak_* files (automatically created backups)")
+for b in dbbak_candidates:
+    with st.expander(b, expanded=False):
+        preview_db_bak(b)
+        if st.button("Restore this DB bak (overwrite current DB)", key=f"restore_bak_{b}"):
+            confirm = st.text_input(f"Type the filename `{b}` to confirm restore:", key=f"confirm_bak_input_{b}")
+            if confirm == b:
+                try:
+                    src = os.path.join(db_dir, b)
+                    # backup current
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    try:
+                        if os.path.exists(DB_FILE):
+                            shutil.copy2(DB_FILE, f"{DB_FILE}.bak_{ts}")
+                    except Exception:
+                        pass
+                    # copy bak into place safely
+                    with tempfile.NamedTemporaryFile(dir=db_dir, prefix="restore_db_", suffix=".db", delete=False) as tf_db:
+                        tmp_db_path = tf_db.name
+                        with open(src, "rb") as ef:
+                            shutil.copyfileobj(ef, tf_db)
+                        tf_db.flush(); os.fsync(tf_db.fileno())
+                    os.replace(tmp_db_path, DB_FILE)
+                    try:
+                        st.cache_resource.clear()
+                    except Exception:
+                        pass
+                    st.success(f"Restored DB from {b}. App will reload.")
+                    log_action(current_username, "restore_from_dbbak", b)
+                    safe_rerun()
+                except Exception as e:
+                    st.error(f"Restore failed: {e}")
+            else:
+                st.warning("Confirmation text mismatch. Type the exact filename to confirm.")
+
+st.markdown("---")
+st.write("If you find a backup that shows non-zero Projects/Participants, restore that one. If none of the backups on the server show data, check any downloaded zip on your local computer (the file you saved when you clicked Download) and upload that zip here and preview it using the earlier preview tool.")
+
+
 # ========================
 # End of file
 # ========================

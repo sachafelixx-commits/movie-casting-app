@@ -1843,344 +1843,368 @@ else:
             st.markdown("---")
             st.write("Note: Schema edits are not supported from this UI. Use a separate DB tool for advanced schema changes.")
           
-          # ---------------- Safe preview + restore block ----------------
-uploaded_zip = st.file_uploader("Upload site backup `.zip` (preview before restore)", type=["zip"])
-if uploaded_zip is not None:
-    st.warning("This tool will preview the uploaded backup. No data will be overwritten until you confirm the final restore.")
+# ----------------- DIAGNOSTIC + ROBUST RESTORE (Admin-only) -----------------
+import stat
+import pwd
+import grp
+import traceback
+
+st.markdown("---")
+st.subheader("⚙️ Diagnostic & Robust Restore (Admin)")
+
+def safe_stat(path):
     try:
-        zip_bytes = uploaded_zip.read()
-        db_dir = os.path.dirname(os.path.abspath(DB_FILE)) or "."
-        os.makedirs(db_dir, exist_ok=True)
-
-        # write uploaded zip to DB dir (avoid cross-device rename issues)
-        tmp_zip_path = None
-        with tempfile.NamedTemporaryFile(dir=db_dir, prefix="preview_zip_", suffix=".zip", delete=False) as tf:
-            tmp_zip_path = tf.name
-            tf.write(zip_bytes)
-            tf.flush()
-            os.fsync(tf.fileno())
-
-        # extract to a temp dir inside db_dir
-        extract_tmp_dir = tempfile.mkdtemp(dir=db_dir, prefix="preview_extract_")
-        with zipfile.ZipFile(tmp_zip_path, "r") as zf:
-            namelist = zf.namelist()
-            st.write("Contents preview (top-level):", [n for n in namelist if "/" not in n or n.startswith("media/")][:200])
-            zf.extractall(path=extract_tmp_dir)
-
-        # Look for data.db in extracted content
-        extracted_db_path = os.path.join(extract_tmp_dir, "data.db")
-        found_db = os.path.exists(extracted_db_path)
-
-        users_count = projects_count = participants_count = None
-        sample_users = []
-        sample_projects = []
-
-        if found_db:
-            try:
-                # open the extracted DB read-only
-                # We open normally then close immediately after reading counts
-                conn_preview = sqlite3.connect(extracted_db_path)
-                conn_preview.row_factory = sqlite3.Row
-                cur = conn_preview.cursor()
-                # get counts (guard with try/except if tables missing)
-                try:
-                    users_count = cur.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
-                except Exception:
-                    users_count = None
-                try:
-                    projects_count = cur.execute("SELECT COUNT(*) AS c FROM projects").fetchone()["c"]
-                except Exception:
-                    projects_count = None
-                try:
-                    participants_count = cur.execute("SELECT COUNT(*) AS c FROM participants").fetchone()["c"]
-                except Exception:
-                    participants_count = None
-
-                # sample rows
-                try:
-                    sample_users = [dict(r) for r in cur.execute("SELECT id, username, role, last_login FROM users ORDER BY id LIMIT 20").fetchall()]
-                except Exception:
-                    sample_users = []
-                try:
-                    sample_projects = [dict(r) for r in cur.execute("SELECT id, user_id, name, created_at FROM projects ORDER BY id LIMIT 20").fetchall()]
-                except Exception:
-                    sample_projects = []
-
-                conn_preview.close()
-            except Exception as e:
-                st.error(f"Unable to read extracted DB for preview: {e}")
-                found_db = False
-
-        # Show preview summary
-        st.markdown("### Preview Summary")
-        if found_db:
-            st.markdown(f"- Found `data.db` in uploaded zip.")
-            st.markdown(f"- Users: **{users_count if users_count is not None else 'unknown (table may be missing)'}**")
-            st.markdown(f"- Projects: **{projects_count if projects_count is not None else 'unknown'}**")
-            st.markdown(f"- Participants: **{participants_count if participants_count is not None else 'unknown'}**")
-            if sample_users:
-                st.markdown("#### Sample users (first 20)")
-                st.table(sample_users)
-            if sample_projects:
-                st.markdown("#### Sample projects (first 20)")
-                st.table(sample_projects)
-        else:
-            st.warning("No `data.db` found inside the uploaded zip. The zip may only contain `media/` or be structured differently.")
-
-        # Offer to proceed with destructive restore (only if previewed)
-        proceed = st.checkbox("I have reviewed the preview above and want to proceed with the full destructive restore (overwrite DB + media).", key="confirm_restore_preview")
-        if proceed:
-            if st.button("Perform Full Restore Now"):
-                try:
-                    # backup existing DB and media (best-effort)
-                    timestamp_now = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    try:
-                        if os.path.exists(DB_FILE):
-                            shutil.copy2(DB_FILE, f"{DB_FILE}.bak_{timestamp_now}")
-                    except Exception:
-                        pass
-                    try:
-                        if os.path.exists(MEDIA_DIR):
-                            # rename if possible, else copy
-                            try:
-                                os.rename(MEDIA_DIR, f"{MEDIA_DIR}.bak_{timestamp_now}")
-                            except Exception:
-                                shutil.copytree(MEDIA_DIR, f"{MEDIA_DIR}.bak_{timestamp_now}")
-                    except Exception:
-                        pass
-
-                    # clear cache before replacing files
-                    try:
-                        st.cache_resource.clear()
-                    except Exception:
-                        pass
-
-                    # Replace DB if present in extracted dir
-                    if found_db:
-                        # create temp DB file in same dir as DB_FILE and copy extracted DB into it
-                        tmp_db_path = None
-                        with tempfile.NamedTemporaryFile(dir=db_dir, prefix="restore_db_", suffix=".db", delete=False) as tf_db:
-                            tmp_db_path = tf_db.name
-                            with open(extracted_db_path, "rb") as ef:
-                                shutil.copyfileobj(ef, tf_db)
-                            tf_db.flush()
-                            os.fsync(tf_db.fileno())
-                        # atomic replace (same filesystem because tmp_db_path is in db_dir)
-                        os.replace(tmp_db_path, DB_FILE)
-
-                    # Replace media if present in extracted dir
-                    extracted_media_dir = os.path.join(extract_tmp_dir, "media")
-                    if os.path.exists(extracted_media_dir):
-                        # remove current media, then move extracted in place
-                        try:
-                            if os.path.exists(MEDIA_DIR):
-                                shutil.rmtree(MEDIA_DIR)
-                        except Exception:
-                            pass
-                        try:
-                            shutil.move(extracted_media_dir, MEDIA_DIR)
-                        except Exception:
-                            # fallback: copytree
-                            shutil.copytree(extracted_media_dir, MEDIA_DIR)
-                            shutil.rmtree(extracted_media_dir, ignore_errors=True)
-
-                    # cleanup temp zip and extraction dir
-                    try:
-                        if os.path.exists(tmp_zip_path):
-                            os.remove(tmp_zip_path)
-                    except Exception:
-                        pass
-                    try:
-                        shutil.rmtree(extract_tmp_dir, ignore_errors=True)
-                    except Exception:
-                        pass
-
-                    log_action(current_username, "full_restore", f"restored_by={current_username}")
-                    st.success("Full restore completed. App will reload now.")
-                    safe_rerun()
-
-                except Exception as e:
-                    st.error(f"Restore failed during execution: {e}")
+        s = os.stat(path)
+        return {
+            "exists": True,
+            "size": s.st_size,
+            "mode": oct(s.st_mode),
+            "uid": getattr(s, "st_uid", None),
+            "gid": getattr(s, "st_gid", None),
+            "mtime": datetime.fromtimestamp(s.st_mtime).isoformat()
+        }
+    except FileNotFoundError:
+        return {"exists": False}
     except Exception as e:
-        st.error(f"Error processing uploaded zip: {e}")
+        return {"error": str(e)}
 
-# ---------- Admin helper: scan, preview, and restore existing backups ----------
+# Show environment basics
+cwd = os.getcwd()
+abs_db = os.path.abspath(DB_FILE)
+st.write("**Working directory:**", cwd)
+st.write("**DB file path (DB_FILE):**", abs_db)
+st.write("**DB exists & stats:**")
+st.json(safe_stat(abs_db))
+st.write("**Media dir stats:**")
+st.json(safe_stat(os.path.abspath(MEDIA_DIR)))
+
+# show owner info if available
+try:
+    if os.path.exists(abs_db):
+        st.write("**DB owner user/group:**")
+        s = os.stat(abs_db)
+        try:
+            uname = pwd.getpwuid(s.st_uid).pw_name
+        except Exception:
+            uname = s.st_uid
+        try:
+            gname = grp.getgrgid(s.st_gid).gr_name
+        except Exception:
+            gname = s.st_gid
+        st.write(f"uid:{s.st_uid} ({uname}), gid:{s.st_gid} ({gname})")
+except Exception:
+    pass
+
+# list app dir files and potential backups
+db_dir = os.path.dirname(abs_db) or "."
+st.write("**Files in app directory (top 200 entries)**")
+try:
+    all_files = sorted(os.listdir(db_dir))
+    st.write(all_files[:200])
+except Exception as e:
+    st.error(f"Unable to list directory `{db_dir}`: {e}")
+
+# find candidate backups
 import fnmatch
-import math
+zip_candidates = []
+dbbak_candidates = []
+for fn in all_files:
+    if fnmatch.fnmatch(fn, "site_backup_*.zip") or fn.endswith(".zip"):
+        zip_candidates.append(fn)
+    if fnmatch.fnmatch(fn, "data.db.bak_*"):
+        dbbak_candidates.append(fn)
 
-def preview_db_counts(db_path):
-    """Return (users_count, projects_count, participants_count, sample_users) or raise."""
-    users_count = projects_count = participants_count = None
-    sample_users = []
+st.markdown("### Backup candidates found")
+st.write("zip files:", zip_candidates)
+st.write("db bak files:", dbbak_candidates)
+
+# helper: open DB and return counts/samples safely
+def preview_db_counts(dbpath):
+    result = {"path": dbpath}
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(dbpath, timeout=10)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
+        def safe_count(q):
+            try:
+                return cur.execute(q).fetchone()[0]
+            except Exception:
+                return None
+        result["users"] = safe_count("SELECT COUNT(*) FROM users")
+        result["projects"] = safe_count("SELECT COUNT(*) FROM projects")
+        result["participants"] = safe_count("SELECT COUNT(*) FROM participants")
+        # sample small rows
         try:
-            users_count = cur.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+            result["sample_users"] = [dict(r) for r in cur.execute("SELECT id,username,role,last_login FROM users ORDER BY id LIMIT 10").fetchall()]
         except Exception:
-            users_count = None
-        try:
-            projects_count = cur.execute("SELECT COUNT(*) as c FROM projects").fetchone()["c"]
-        except Exception:
-            projects_count = None
-        try:
-            participants_count = cur.execute("SELECT COUNT(*) as c FROM participants").fetchone()["c"]
-        except Exception:
-            participants_count = None
-        try:
-            sample_users = [dict(r) for r in cur.execute("SELECT id, username, role, last_login FROM users ORDER BY id LIMIT 10").fetchall()]
-        except Exception:
-            sample_users = []
+            result["sample_users"] = []
         conn.close()
-        return users_count, projects_count, participants_count, sample_users
     except Exception as e:
-        raise
+        result["error"] = str(e)
+    return result
 
-db_dir = os.path.dirname(os.path.abspath(DB_FILE)) or "."
-st.markdown("---")
-st.subheader("🕵️‍♂️ Scan & Preview Existing Backups (Admin-only)")
+# Show metadata + preview for DB .bak files
+if dbbak_candidates:
+    st.markdown("#### data.db.bak_* previews")
+for b in dbbak_candidates:
+    p = os.path.join(db_dir, b)
+    st.write(f"**{b}** — {safe_stat(p)}")
+    preview = preview_db_counts(p)
+    st.json(preview)
 
-# find files
-files = sorted(os.listdir(db_dir))
-zip_candidates = [f for f in files if fnmatch.fnmatch(f, "site_backup_*.zip")]
-dbbak_candidates = [f for f in files if fnmatch.fnmatch(f, "data.db.bak_*")]
-mediabak_candidates = [f for f in files if fnmatch.fnmatch(f, "media.bak_*")]
-
-st.markdown(f"**Search path:** `{db_dir}`")
-st.write(f"Found {len(zip_candidates)} backup zip(s), {len(dbbak_candidates)} DB .bak file(s), {len(mediabak_candidates)} media .bak(s).")
-
-# Helper UI: show zips with preview
-def preview_zip(zipname):
+# For zip files: show namelist and allow preview of any db inside
+def preview_zip_contents(zipname):
     p = os.path.join(db_dir, zipname)
-    st.write(f"**{zipname}** — {round(os.path.getsize(p)/1024.0,1)} KB")
-    # extract data.db to temp inside db_dir
-    tmp_preview_dir = tempfile.mkdtemp(dir=db_dir, prefix="scan_preview_")
-    tmp_zip = None
     try:
         with zipfile.ZipFile(p, "r") as zf:
             namelist = zf.namelist()
-            st.write("Contents (top-level examples):", namelist[:40])
-            if "data.db" in namelist:
-                zf.extract("data.db", path=tmp_preview_dir)
-                extracted_db_path = os.path.join(tmp_preview_dir, "data.db")
+            st.write("Contents:", namelist[:200])
+            # find candidates that look like a DB
+            db_candidates = [n for n in namelist if n.lower().endswith(".db") or os.path.basename(n).lower() == "data.db"]
+            st.write("DB-like files inside zip:", db_candidates)
+            previews = {}
+            for dbn in db_candidates:
+                tmpdir = tempfile.mkdtemp(dir=db_dir, prefix="preview_zip_")
                 try:
-                    u,pj,par, sample = preview_db_counts(extracted_db_path)
-                    st.write(f"- Users: **{u}**  Projects: **{pj}** Participants: **{par}**")
-                    if sample:
-                        st.write("Sample users:")
-                        st.table(sample)
+                    zf.extract(dbn, path=tmpdir)
+                    extracted_path = os.path.join(tmpdir, dbn)
+                    # if nested, ensure path exists
+                    if not os.path.exists(extracted_path):
+                        # perhaps the extraction preserved directories; find .db under tmpdir
+                        for root, _, files in os.walk(tmpdir):
+                            for f in files:
+                                if f.lower().endswith(".db"):
+                                    extracted_path = os.path.join(root, f)
+                                    break
+                    previews[dbn] = preview_db_counts(extracted_path)
                 except Exception as e:
-                    st.error(f"Unable to preview data.db inside zip: {e}")
-            else:
-                st.info("No `data.db` at top-level inside this zip.")
+                    previews[dbn] = {"error": str(e)}
+                finally:
+                    try:
+                        shutil.rmtree(tmpdir, ignore_errors=True)
+                    except Exception:
+                        pass
+            return {"namelist": namelist, "db_previews": previews}
     except Exception as e:
-        st.error(f"Error reading zip: {e}")
+        return {"error": str(e)}
+
+# Render zip candidates with preview button
+for z in zip_candidates:
+    with st.expander(z, expanded=False):
+        try:
+            res = preview_zip_contents(z)
+            st.json(res)
+        except Exception as e:
+            st.error(f"Unable to preview zip {z}: {e}\n{traceback.format_exc()}")
+
+# Robust restore helper (works across filesystems by copying + fsync)
+def atomic_copy_with_fsync(src_path, dst_path):
+    """
+    Copy src_path into dst_path safely:
+    - write to a tmp file in same directory as dst_path
+    - fsync temp file
+    - os.replace temp->dst if possible
+    If os.replace raises cross-device errors, fallback to copying and fsyncing the destination file.
+    """
+    dst_dir = os.path.dirname(os.path.abspath(dst_path)) or "."
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=dst_dir, prefix=".tmp_restore_")
+    os.close(tmp_fd)
+    try:
+        # copy contents
+        with open(src_path, "rb") as sf, open(tmp_path, "wb") as tf:
+            shutil.copyfileobj(sf, tf)
+            tf.flush()
+            os.fsync(tf.fileno())
+        # try atomic replace
+        try:
+            os.replace(tmp_path, dst_path)
+            return True, None
+        except Exception as e_replace:
+            # fallback: copy into place
+            try:
+                shutil.copyfile(tmp_path, dst_path)
+                # fsync destination
+                with open(dst_path, "rb+") as df:
+                    df.flush()
+                    os.fsync(df.fileno())
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+                return True, None
+            except Exception as e_copy:
+                return False, f"replace_error:{e_replace} copy_error:{e_copy}"
     finally:
         try:
-            shutil.rmtree(tmp_preview_dir, ignore_errors=True)
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         except Exception:
             pass
 
-# Helper UI: show DB bak preview
-def preview_db_bak(bakname):
-    p = os.path.join(db_dir, bakname)
-    st.write(f"**{bakname}** — {round(os.path.getsize(p)/1024.0,1)} KB")
-    try:
-        u,pj,par, sample = preview_db_counts(p)
-        st.write(f"- Users: **{u}**  Projects: **{pj}** Participants: **{par}**")
-        if sample:
-            st.write("Sample users:")
-            st.table(sample)
-    except Exception as e:
-        st.error(f"Unable to preview DB bak: {e}")
+# UI: choose a zip or a db.bak to restore from
+st.markdown("### Perform a robust restore from an existing candidate")
+st.write("Choose a source (zip or db.bak). The app will back up current DB/media first, then copy the chosen DB into place and replace media if available. It will verify the new DB by reopening and printing counts.")
 
-# Render lists with preview buttons (and restore action)
-st.markdown("### Zip backups found")
-for z in zip_candidates:
-    with st.expander(z, expanded=False):
-        preview_zip(z)
-        restore_key = f"restore_zip_{z}"
-        if st.button("Restore this backup (overwrite DB + media)", key=restore_key):
-            confirm = st.text_input(f"Type the filename `{z}` to confirm destructive restore:", key=f"confirm_input_{z}")
-            if confirm == z:
+source_type = st.radio("Source type", ["zip", "db.bak"], index=0, horizontal=True)
+if source_type == "zip" and zip_candidates:
+    chosen_zip = st.selectbox("Choose zip to restore from", [None] + zip_candidates)
+    if chosen_zip:
+        # allow selecting which .db inside zip if multiple
+        pzip = os.path.join(db_dir, chosen_zip)
+        with zipfile.ZipFile(pzip, "r") as zf:
+            db_candidates = [n for n in zf.namelist() if n.lower().endswith(".db") or os.path.basename(n).lower()=="data.db"]
+        if db_candidates:
+            chosen_db_inside = st.selectbox("DB file inside zip to use", db_candidates)
+        else:
+            chosen_db_inside = None
+
+        if st.button("Preview chosen DB inside zip"):
+            try:
+                tmpdir = tempfile.mkdtemp(dir=db_dir, prefix="preview_chosen_")
+                with zipfile.ZipFile(pzip, "r") as zf:
+                    # extract the one chosen DB (or all .db if chosen_db_inside is None)
+                    if chosen_db_inside:
+                        zf.extract(chosen_db_inside, path=tmpdir)
+                    else:
+                        # extract all .db and pick first
+                        to_extract = [n for n in zf.namelist() if n.lower().endswith(".db")]
+                        if not to_extract:
+                            st.error("No .db found in zip to preview.")
+                            shutil.rmtree(tmpdir, ignore_errors=True)
+                            tmpdir = None
+                        else:
+                            zf.extract(to_extract[0], path=tmpdir)
+                            chosen_db_inside = to_extract[0]
+                if tmpdir:
+                    # find the extracted file
+                    extracted_path = os.path.join(tmpdir, chosen_db_inside)
+                    if not os.path.exists(extracted_path):
+                        # try to find any .db under tmpdir
+                        candidates=[]
+                        for root, _, files in os.walk(tmpdir):
+                            for f in files:
+                                if f.lower().endswith(".db"):
+                                    candidates.append(os.path.join(root,f))
+                        if candidates:
+                            extracted_path = candidates[0]
+                    if os.path.exists(extracted_path):
+                        st.write("Extracted DB preview path:", extracted_path)
+                        st.json(preview_db_counts(extracted_path))
+                    else:
+                        st.error("Could not locate extracted DB inside temp dir.")
+                # cleanup
                 try:
-                    # perform the same careful restore as earlier
-                    src = os.path.join(db_dir, z)
-                    tmp_zip_path = None
-                    with tempfile.NamedTemporaryFile(dir=db_dir, prefix="restore_zip_", suffix=".zip", delete=False) as tf:
-                        tmp_zip_path = tf.name
-                        with open(src, "rb") as sf:
-                            shutil.copyfileobj(sf, tf)
-                        tf.flush(); os.fsync(tf.fileno())
-                    extract_tmp_dir = tempfile.mkdtemp(dir=db_dir, prefix="restore_extract_")
-                    with zipfile.ZipFile(tmp_zip_path, "r") as zf:
-                        zf.extractall(path=extract_tmp_dir)
-                    # backup current state
+                    if tmpdir:
+                        shutil.rmtree(tmpdir, ignore_errors=True)
+                except Exception:
+                    pass
+            except Exception as e:
+                st.error(f"Preview failed: {e}\n{traceback.format_exc()}")
+
+        # perform restore
+        if st.button("Perform restore from this zip (destructive)"):
+            # confirm text
+            confirm_text = st.text_input("Type 'RESTORE' to confirm destructive restore", key="confirm_restore_confirm")
+            if confirm_text == "RESTORE":
+                try:
+                    # backup current DB and media
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     try:
                         if os.path.exists(DB_FILE):
                             shutil.copy2(DB_FILE, f"{DB_FILE}.bak_{ts}")
                     except Exception:
-                        pass
+                        st.warning("Failed to copy current DB to .bak (continuing).")
                     try:
                         if os.path.exists(MEDIA_DIR):
                             try:
-                                os.rename(MEDIA_DIR, f"{MEDIA_DIR}.bak_{ts}")
-                            except Exception:
                                 shutil.copytree(MEDIA_DIR, f"{MEDIA_DIR}.bak_{ts}")
+                            except Exception:
+                                st.warning("Failed to backup media folder (continuing).")
                     except Exception:
                         pass
-                    # clear cache
+
+                    # extract chosen db to temp file
+                    tmp_extract_dir = tempfile.mkdtemp(dir=db_dir, prefix="restore_extract_")
+                    with zipfile.ZipFile(os.path.join(db_dir, chosen_zip),"r") as zf:
+                        # extract selected item
+                        if chosen_db_inside:
+                            zf.extract(chosen_db_inside, path=tmp_extract_dir)
+                            extracted_candidate = os.path.join(tmp_extract_dir, chosen_db_inside)
+                        else:
+                            # extract first .db
+                            dbs = [n for n in zf.namelist() if n.lower().endswith(".db")]
+                            if not dbs:
+                                raise RuntimeError("No .db inside zip")
+                            zf.extract(dbs[0], path=tmp_extract_dir)
+                            extracted_candidate = os.path.join(tmp_extract_dir, dbs[0])
+
+                    # locate actual extracted file (in case nested)
+                    if not os.path.exists(extracted_candidate):
+                        found=None
+                        for root,_,files in os.walk(tmp_extract_dir):
+                            for f in files:
+                                if f.lower().endswith(".db"):
+                                    found = os.path.join(root,f)
+                                    break
+                            if found:
+                                break
+                        if found:
+                            extracted_candidate = found
+
+                    if not os.path.exists(extracted_candidate):
+                        raise RuntimeError("Unable to locate extracted DB after extraction.")
+
+                    # copy DB into place robustly
+                    ok, err = atomic_copy_with_fsync(extracted_candidate, DB_FILE)
+                    if not ok:
+                        raise RuntimeError(f"Failed to copy DB into place: {err}")
+
+                    # If zip contains media folder, replace it
+                    with zipfile.ZipFile(os.path.join(db_dir, chosen_zip),"r") as zf:
+                        if any(n.startswith("media/") for n in zf.namelist()):
+                            # extract whole media into tmp and then move
+                            zf.extractall(path=tmp_extract_dir)
+                            extracted_media_dir = os.path.join(tmp_extract_dir, "media")
+                            if os.path.exists(extracted_media_dir):
+                                # remove existing media then move
+                                if os.path.exists(MEDIA_DIR):
+                                    try:
+                                        shutil.rmtree(MEDIA_DIR)
+                                    except Exception:
+                                        pass
+                                try:
+                                    shutil.move(extracted_media_dir, MEDIA_DIR)
+                                except Exception:
+                                    shutil.copytree(extracted_media_dir, MEDIA_DIR)
+                                    shutil.rmtree(extracted_media_dir, ignore_errors=True)
+
+                    # clear cache, reopen DB and verify
                     try:
                         st.cache_resource.clear()
                     except Exception:
                         pass
-                    # replace DB if present
-                    extracted_db_path = os.path.join(extract_tmp_dir, "data.db")
-                    if os.path.exists(extracted_db_path):
-                        with tempfile.NamedTemporaryFile(dir=db_dir, prefix="restore_db_", suffix=".db", delete=False) as tf_db:
-                            tmp_db_path = tf_db.name
-                            with open(extracted_db_path, "rb") as ef:
-                                shutil.copyfileobj(ef, tf_db)
-                            tf_db.flush(); os.fsync(tf_db.fileno())
-                        os.replace(tmp_db_path, DB_FILE)
-                    # replace media
-                    extracted_media_dir = os.path.join(extract_tmp_dir, "media")
-                    if os.path.exists(extracted_media_dir):
-                        try:
-                            if os.path.exists(MEDIA_DIR):
-                                shutil.rmtree(MEDIA_DIR)
-                        except Exception:
-                            pass
-                        try:
-                            shutil.move(extracted_media_dir, MEDIA_DIR)
-                        except Exception:
-                            shutil.copytree(extracted_media_dir, MEDIA_DIR)
-                            shutil.rmtree(extracted_media_dir, ignore_errors=True)
-                    shutil.rmtree(extract_tmp_dir, ignore_errors=True)
-                    try:
-                        if os.path.exists(tmp_zip_path):
-                            os.remove(tmp_zip_path)
-                    except Exception:
-                        pass
-                    st.success(f"Restored backup {z}. App will reload.")
-                    log_action(current_username, "restore_from_backup_zip", z)
+                    verify = preview_db_counts(DB_FILE)
+                    st.success("Restore completed — verification results:")
+                    st.json(verify)
                     safe_rerun()
                 except Exception as e:
-                    st.error(f"Restore failed: {e}")
+                    st.error(f"Restore failed: {e}\n{traceback.format_exc()}")
             else:
-                st.warning("Confirmation text mismatch. Type the exact filename to confirm.")
+                st.warning("Type 'RESTORE' exactly to confirm.")
+else:
+    st.write("No zip candidates found or you selected db.bak option.")
 
-st.markdown("### data.db.bak_* files (automatically created backups)")
-for b in dbbak_candidates:
-    with st.expander(b, expanded=False):
-        preview_db_bak(b)
-        if st.button("Restore this DB bak (overwrite current DB)", key=f"restore_bak_{b}"):
-            confirm = st.text_input(f"Type the filename `{b}` to confirm restore:", key=f"confirm_bak_input_{b}")
-            if confirm == b:
+# Option: restore directly from a data.db.bak file if desired
+if source_type == "db.bak" and dbbak_candidates:
+    chosen_bak = st.selectbox("Choose DB bak to restore from", [None] + dbbak_candidates, key="choose_bak")
+    if chosen_bak:
+        if st.button("Preview chosen DB bak"):
+            st.json(preview_db_counts(os.path.join(db_dir, chosen_bak)))
+        if st.button("Restore chosen db.bak (destructive)"):
+            confirm_b = st.text_input("Type 'RESTOREBAK' to confirm", key="confirm_restore_bak")
+            if confirm_b == "RESTOREBAK":
                 try:
-                    src = os.path.join(db_dir, b)
+                    src = os.path.join(db_dir, chosen_bak)
                     # backup current
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     try:
@@ -2188,28 +2212,23 @@ for b in dbbak_candidates:
                             shutil.copy2(DB_FILE, f"{DB_FILE}.bak_{ts}")
                     except Exception:
                         pass
-                    # copy bak into place safely
-                    with tempfile.NamedTemporaryFile(dir=db_dir, prefix="restore_db_", suffix=".db", delete=False) as tf_db:
-                        tmp_db_path = tf_db.name
-                        with open(src, "rb") as ef:
-                            shutil.copyfileobj(ef, tf_db)
-                        tf_db.flush(); os.fsync(tf_db.fileno())
-                    os.replace(tmp_db_path, DB_FILE)
+                    ok, err = atomic_copy_with_fsync(src, DB_FILE)
+                    if not ok:
+                        raise RuntimeError(err)
                     try:
                         st.cache_resource.clear()
                     except Exception:
                         pass
-                    st.success(f"Restored DB from {b}. App will reload.")
-                    log_action(current_username, "restore_from_dbbak", b)
+                    verify = preview_db_counts(DB_FILE)
+                    st.success("DB bak restore completed — verification:")
+                    st.json(verify)
                     safe_rerun()
                 except Exception as e:
-                    st.error(f"Restore failed: {e}")
-            else:
-                st.warning("Confirmation text mismatch. Type the exact filename to confirm.")
+                    st.error(f"Restore failed: {e}\n{traceback.format_exc()}")
 
 st.markdown("---")
-st.write("If you find a backup that shows non-zero Projects/Participants, restore that one. If none of the backups on the server show data, check any downloaded zip on your local computer (the file you saved when you clicked Download) and upload that zip here and preview it using the earlier preview tool.")
-
+st.write("If you run this and still see zero projects/participants in the restored DB, then (A) the backups do not actually contain that data OR (B) your app is looking at a *different* DB path than `DB_FILE`. If that happens, paste the verification JSON you get here and I will read it and tell you exactly what to do next.")
+# ----------------- end diagnostic block -----------------
 
 # ========================
 # End of file

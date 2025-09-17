@@ -1823,6 +1823,191 @@ st.write("""
 3. If `Live counts` are already missing projects, tell me what action you performed earlier (deleted, migrated, restored) and we will look in any `.bak` files or logs (the app writes `logs` table) to trace when/why projects were removed.
 """)
 # ---------- end block ----------
+# ---------------- Admin: Upload & Restore single active dataset (drop-in) ----------------
+import io, zipfile, tempfile, shutil, os, traceback, sqlite3
+
+st.markdown("---")
+st.subheader("⬆️ Upload backup (.zip) and replace active dataset (Admin)")
+
+# helper to get counts from a DB file (path)
+def preview_db_counts_from_path(dbpath):
+    out = {"path": dbpath}
+    try:
+        conn = sqlite3.connect(dbpath, timeout=10)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        def safe_count(q):
+            try:
+                return cur.execute(q).fetchone()[0]
+            except Exception:
+                return None
+        out["users"] = safe_count("SELECT COUNT(*) FROM users")
+        out["projects"] = safe_count("SELECT COUNT(*) FROM projects")
+        out["participants"] = safe_count("SELECT COUNT(*) FROM participants")
+        try:
+            out["sample_users"] = [dict(r) for r in cur.execute("SELECT id,username,role,last_login FROM users ORDER BY id LIMIT 10").fetchall()]
+        except Exception:
+            out["sample_users"] = []
+        conn.close()
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+# robust copy: write src file into destination path atomically using tmp file + fsync
+def atomic_copy_with_fsync(src_path, dst_path):
+    dst_dir = os.path.dirname(os.path.abspath(dst_path)) or "."
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=dst_dir, prefix=".tmp_restore_")
+    os.close(tmp_fd)
+    try:
+        with open(src_path, "rb") as sf, open(tmp_path, "wb") as tf:
+            shutil.copyfileobj(sf, tf)
+            tf.flush()
+            os.fsync(tf.fileno())
+        try:
+            os.replace(tmp_path, dst_path)
+            return True, None
+        except Exception as e_replace:
+            # fallback to copy
+            try:
+                shutil.copyfile(tmp_path, dst_path)
+                with open(dst_path, "rb+") as df:
+                    df.flush()
+                    os.fsync(df.fileno())
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+                return True, None
+            except Exception as e_copy:
+                return False, f"replace_err:{e_replace} copy_err:{e_copy}"
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+# Uploader
+uploaded_zip = st.file_uploader("Upload backup .zip to restore (this will replace the active dataset)", type=["zip"])
+if uploaded_zip is not None:
+    st.warning("Preview will run. Nothing will be overwritten until you type 'REPLACE' and click the final button.")
+    try:
+        # write uploaded zip into temp file inside DB dir to avoid cross-device issues
+        db_dir = os.path.dirname(os.path.abspath(DB_FILE)) or "."
+        os.makedirs(db_dir, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=db_dir, prefix="upload_tmp_", suffix=".zip", delete=False) as tf:
+            tmp_zip_path = tf.name
+            uploaded_zip.seek(0)
+            tf.write(uploaded_zip.read())
+            tf.flush()
+            os.fsync(tf.fileno())
+
+        # extract to a temp directory inside db_dir
+        extract_dir = tempfile.mkdtemp(dir=db_dir, prefix="restore_extract_")
+        with zipfile.ZipFile(tmp_zip_path, "r") as zf:
+            # show top-level namelist for debugging
+            namelist = zf.namelist()
+            st.write("Zip contents (sample):", namelist[:200])
+            zf.extractall(path=extract_dir)
+
+        # find .db files in extracted tree
+        extracted_db_candidates = []
+        for root, _, files in os.walk(extract_dir):
+            for f in files:
+                if f.lower().endswith(".db"):
+                    extracted_db_candidates.append(os.path.join(root, f))
+
+        if not extracted_db_candidates:
+            st.error("No .db file found inside uploaded zip. Abort.")
+            # cleanup
+            try: os.remove(tmp_zip_path)
+            except Exception: pass
+            try: shutil.rmtree(extract_dir, ignore_errors=True)
+            except Exception: pass
+        else:
+            # pick first candidate (present common case: data.db at top)
+            candidate_db = extracted_db_candidates[0]
+            st.markdown("### Preview of uploaded DB (first .db found)")
+            preview = preview_db_counts_from_path(candidate_db)
+            if preview.get("error"):
+                st.error(f"Unable to read extracted DB: {preview['error']}")
+            else:
+                st.write(f"- Users: **{preview.get('users')}**, Projects: **{preview.get('projects')}**, Participants: **{preview.get('participants')}**")
+                if preview.get("sample_users"):
+                    st.write("Sample users:")
+                    st.table(preview["sample_users"])
+
+            st.warning("Restoring will DELETE the current `media/` and replace `data.db`. This is destructive and irreversible on the server.")
+            confirm_text = st.text_input("Type 'REPLACE' to enable the final restore button", key="admin_restore_confirm")
+            if confirm_text == "REPLACE":
+                if st.button("Perform destructive restore now"):
+                    try:
+                        # perform atomic copy of DB into place
+                        ok, err = atomic_copy_with_fsync(candidate_db, DB_FILE)
+                        if not ok:
+                            raise RuntimeError(f"Failed to install DB: {err}")
+
+                        # handle media folder replacement: if extracted media exists use it; else delete existing media
+                        extracted_media_dir = os.path.join(extract_dir, "media")
+                        if os.path.exists(extracted_media_dir):
+                            # remove current media
+                            try:
+                                if os.path.exists(MEDIA_DIR):
+                                    shutil.rmtree(MEDIA_DIR)
+                            except Exception:
+                                pass
+                            # move extracted into place (move should work because extracted and MEDIA_DIR are same fs)
+                            try:
+                                shutil.move(extracted_media_dir, MEDIA_DIR)
+                            except Exception:
+                                # fallback to copy
+                                shutil.copytree(extracted_media_dir, MEDIA_DIR)
+                                try: shutil.rmtree(extracted_media_dir, ignore_errors=True)
+                                except Exception: pass
+                        else:
+                            # no media in zip → delete existing media to ensure single dataset (per your earlier request)
+                            try:
+                                if os.path.exists(MEDIA_DIR):
+                                    shutil.rmtree(MEDIA_DIR)
+                            except Exception:
+                                pass
+
+                        # remove temp files (no backups left on server)
+                        try: os.remove(tmp_zip_path)
+                        except Exception: pass
+                        try: shutil.rmtree(extract_dir, ignore_errors=True)
+                        except Exception: pass
+
+                        # clear streamlit cached DB connections
+                        try:
+                            st.cache_resource.clear()
+                        except Exception:
+                            pass
+
+                        # verify live counts by opening DB_FILE
+                        verification = preview_db_counts_from_path(DB_FILE)
+                        if verification.get("error"):
+                            st.error(f"Restore completed but verification failed: {verification['error']}")
+                        else:
+                            st.success("Restore completed. Verification (live DB on disk):")
+                            st.write(f"- Users: **{verification.get('users')}**, Projects: **{verification.get('projects')}**, Participants: **{verification.get('participants')}**")
+                            if verification.get("sample_users"):
+                                st.write("Sample users (live):")
+                                st.table(verification["sample_users"])
+
+                        # final reload
+                        safe_rerun()
+                    except Exception as e:
+                        st.error(f"Restore failed: {e}\n{traceback.format_exc()}")
+                        # try cleanup
+                        try: os.remove(tmp_zip_path)
+                        except Exception: pass
+                        try: shutil.rmtree(extract_dir, ignore_errors=True)
+                        except Exception: pass
+            else:
+                st.info("Type 'REPLACE' exactly to enable restore.")
+    except Exception as e:
+        st.error(f"Error processing uploaded backup: {e}\n{traceback.format_exc()}")
 
 
 # ========================

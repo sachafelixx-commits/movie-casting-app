@@ -10,6 +10,7 @@ import uuid
 import shutil
 import re
 import tempfile
+import zipfile
 from datetime import datetime, date
 from docx import Document
 from docx.shared import Inches
@@ -1623,8 +1624,8 @@ else:
                                     "type": col["type"],
                                     "notnull": bool(col["notnull"]),
                                     "default": col["dflt_value"],
-                                    "pk": bool(col["pk"])
-                                })
+                                    "pk": bool(col["pk"]) }
+                                )
                             st.markdown("**Schema**")
                             st.table(schema_display)
                     except Exception as e:
@@ -1657,84 +1658,197 @@ else:
                     except Exception as e:
                         st.error(f"Unable to fetch table data: {e}")
 
-            # Backup: download DB file
+            # ------------------------
+            # Full Site Backup / Restore (DB + media)
+            # ------------------------
             st.markdown("---")
-            st.markdown("**Backup / Restore**")
+            st.subheader("🗄️ Full Site Backup & Restore (DB + media)")
+
+            db_dir = os.path.dirname(os.path.abspath(DB_FILE)) or "."
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            def make_full_backup_zip(target_zip_path):
+                """Create a zip containing data.db (if exists) and the media directory (if exists)."""
+                try:
+                    with zipfile.ZipFile(target_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                        # add DB file (at top-level inside zip as 'data.db')
+                        if os.path.exists(DB_FILE):
+                            zf.write(DB_FILE, arcname="data.db")
+                        # add media directory (preserve relative paths)
+                        if os.path.exists(MEDIA_DIR):
+                            for root, dirs, files in os.walk(MEDIA_DIR):
+                                for f in files:
+                                    full = os.path.join(root, f)
+                                    zf.write(full, arcname=os.path.join("media", os.path.relpath(full, MEDIA_DIR)))
+                    return True, None
+                except Exception as e:
+                    return False, str(e)
+
+            # Create backup on disk (in DB dir) and present download button
             try:
-                if os.path.exists(DB_FILE):
-                    with open(DB_FILE, "rb") as f:
-                        db_bytes = f.read()
+                # create a temp zip in same dir as DB so it's on same filesystem (avoid cross-device issues)
+                backup_zip_name = f"site_backup_{timestamp}.zip"
+                backup_zip_path = os.path.join(db_dir, backup_zip_name)
+
+                # Make the zip (overwrite if exists)
+                ok, err = make_full_backup_zip(backup_zip_path)
+                if ok and os.path.exists(backup_zip_path):
+                    with open(backup_zip_path, "rb") as f:
+                        zip_bytes = f.read()
                     st.download_button(
-                        label="📥 Download Database Backup",
-                        data=db_bytes,
-                        file_name=f"data_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
-                        mime="application/octet-stream"
+                        label="📥 Download Full Site Backup (DB + media)",
+                        data=zip_bytes,
+                        file_name=backup_zip_name,
+                        mime="application/zip"
                     )
+                    st.write(f"Backup created: **{backup_zip_name}** (includes `data.db` and `media/`)")
                 else:
-                    st.info("Database file not found for backup.")
+                    st.error(f"Unable to create backup: {err}")
             except Exception as e:
-                st.error(f"Unable to prepare backup download: {e}")
+                st.error(f"Backup error: {e}")
 
-            st.markdown("**Restore database from .db file (overwrites current DB)**")
-            st.write("Upload a valid SQLite `.db` file to replace the current database. This action will overwrite the existing data. A confirmation is required.")
-            # ----------------- Replace your existing restore block with this -----------------
-uploaded = st.file_uploader("Upload .db file to restore", type=["db"])
-if uploaded is not None:
-    st.warning("⚠️ Restore will overwrite the current database file.")
-    confirm = st.checkbox("I understand this will overwrite the current database. Proceed with restore.", key="confirm_restore_checkbox")
-    if confirm:
-        if st.button("Restore Database Now"):
-            try:
-                # read uploaded bytes
-                data_bytes = uploaded.read()
-                # ensure the DB directory exists
-                db_dir = os.path.dirname(os.path.abspath(DB_FILE)) or "."
-                os.makedirs(db_dir, exist_ok=True)
+            st.markdown("---")
+            st.markdown("**Restore full site from `.zip` (will overwrite DB and media).**")
+            st.write("Upload a site backup `.zip` created by this tool. This will overwrite your current `data.db` and `media/` folder. The current DB and media will be copied to timestamped `.bak` locations before overwrite (best-effort).")
 
-                # create temp file in same directory as DB_FILE so os.replace() can rename across filesystems
-                tf = None
-                tmp_path = None
-                try:
-                    with tempfile.NamedTemporaryFile(dir=db_dir, prefix="restore_tmp_", suffix=".db", delete=False) as tf:
-                        tmp_path = tf.name
-                        tf.write(data_bytes)
-                        tf.flush()
-                        os.fsync(tf.fileno())
-                except Exception as e:
-                    # fallback: write to a temp file anywhere and then copy into place
-                    # but prefer to fail loudly so admin can fix permissions
-                    raise RuntimeError(f"Failed to write temporary DB file in database directory: {e}")
+            uploaded_zip = st.file_uploader("Upload site backup `.zip`", type=["zip"])
+            if uploaded_zip is not None:
+                st.warning("⚠️ Restoring will overwrite current data (DB and media). This operation is destructive.")
+                confirm_restore = st.checkbox("I confirm I want to restore the site from this .zip and understand this will overwrite current data.", key="confirm_full_restore")
+                if confirm_restore:
+                    if st.button("Restore Full Site Now"):
+                        try:
+                            # read bytes
+                            zip_bytes = uploaded_zip.read()
+                            # ensure write access to DB dir
+                            os.makedirs(db_dir, exist_ok=True)
 
-                # make a timestamped backup of existing DB (best-effort)
-                try:
-                    if os.path.exists(DB_FILE):
-                        backup_path = f"{DB_FILE}.bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                        shutil.copy2(DB_FILE, backup_path)
-                except Exception:
-                    # ignore backup errors but continue (we already have tmp file)
-                    pass
+                            # write uploaded zip as a temp file in same db_dir
+                            tmp_zip_path = None
+                            try:
+                                with tempfile.NamedTemporaryFile(dir=db_dir, prefix="restore_zip_", suffix=".zip", delete=False) as tf:
+                                    tmp_zip_path = tf.name
+                                    tf.write(zip_bytes)
+                                    tf.flush()
+                                    os.fsync(tf.fileno())
+                            except Exception as e:
+                                raise RuntimeError(f"Unable to write temporary zip in DB directory: {e}")
 
-                # atomically replace
-                try:
-                    os.replace(tmp_path, DB_FILE)  # tmp_path is in same dir as DB_FILE so this should succeed
-                except Exception as e:
-                    # cleanup the temp file if replace failed
-                    try:
-                        if tmp_path and os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-                    except Exception:
-                        pass
-                    raise
+                            # extract into a temp extraction dir inside DB dir (so moves are on same fs)
+                            extract_tmp_dir = tempfile.mkdtemp(dir=db_dir, prefix="restore_extract_")
+                            try:
+                                with zipfile.ZipFile(tmp_zip_path, "r") as zf:
+                                    # basic validation: require at least a data.db in zip OR a media/ folder
+                                    namelist = zf.namelist()
+                                    if "data.db" not in namelist and not any(n.startswith("media/") for n in namelist):
+                                        raise RuntimeError("Uploaded zip does not contain 'data.db' nor 'media/' — aborting restore.")
+                                    zf.extractall(path=extract_tmp_dir)
+                            except Exception as e:
+                                # cleanup and re-raise
+                                try:
+                                    if os.path.exists(tmp_zip_path):
+                                        os.remove(tmp_zip_path)
+                                except Exception:
+                                    pass
+                                shutil.rmtree(extract_tmp_dir, ignore_errors=True)
+                                raise
 
-                # clear cached DB connection so new file is used
-                try:
-                    st.cache_resource.clear()
-                except Exception:
-                    pass
+                            # best-effort backup current DB and media
+                            try:
+                                if os.path.exists(DB_FILE):
+                                    db_backup_path = f"{DB_FILE}.bak_{timestamp}"
+                                    shutil.copy2(DB_FILE, db_backup_path)
+                            except Exception:
+                                # ignore but continue
+                                pass
+                            try:
+                                if os.path.exists(MEDIA_DIR):
+                                    media_backup_path = f"{MEDIA_DIR}.bak_{timestamp}"
+                                    try:
+                                        os.rename(MEDIA_DIR, media_backup_path)
+                                    except Exception:
+                                        shutil.copytree(MEDIA_DIR, media_backup_path)
+                            except Exception:
+                                pass
 
-                log_action(current_username, "restore_database", f"restored_by={current_username}")
-                st.success("Database restored successfully. The app will reload to use the restored DB.")
-                safe_rerun()
+                            # clear streamlit cached DB resource BEFORE replacing so connections are released
+                            try:
+                                st.cache_resource.clear()
+                            except Exception:
+                                pass
 
-            except Exception as e:
-                st.error(f"Restore failed: {e}")
+                            # Replace DB if present in extracted dir
+                            extracted_db_path = os.path.join(extract_tmp_dir, "data.db")
+                            if os.path.exists(extracted_db_path):
+                                # create temp path in same dir as DB and move
+                                tmp_db_path = None
+                                try:
+                                    with tempfile.NamedTemporaryFile(dir=db_dir, prefix="restore_db_", suffix=".db", delete=False) as tf:
+                                        tmp_db_path = tf.name
+                                        # copy extracted DB bytes into tmp_db_path
+                                        with open(extracted_db_path, "rb") as ef:
+                                            shutil.copyfileobj(ef, tf)
+                                        tf.flush()
+                                        os.fsync(tf.fileno())
+                                    # atomically replace
+                                    os.replace(tmp_db_path, DB_FILE)
+                                except Exception as e:
+                                    # cleanup and abort
+                                    try:
+                                        if tmp_db_path and os.path.exists(tmp_db_path):
+                                            os.remove(tmp_db_path)
+                                    except Exception:
+                                        pass
+                                    raise RuntimeError(f"Failed to replace DB file: {e}")
+
+                            # Replace media folder if present in extracted dir
+                            extracted_media_dir = os.path.join(extract_tmp_dir, "media")
+                            if os.path.exists(extracted_media_dir):
+                                # remove existing media folder (if present) and move extracted one into place
+                                try:
+                                    if os.path.exists(MEDIA_DIR):
+                                        shutil.rmtree(MEDIA_DIR)
+                                except Exception:
+                                    pass
+                                # try atomic move
+                                try:
+                                    shutil.move(extracted_media_dir, MEDIA_DIR)
+                                except Exception:
+                                    # fallback to copytree
+                                    try:
+                                        shutil.copytree(extracted_media_dir, MEDIA_DIR)
+                                        shutil.rmtree(extracted_media_dir, ignore_errors=True)
+                                    except Exception as e:
+                                        raise RuntimeError(f"Failed to install media folder: {e}")
+
+                            # cleanup tmp files
+                            try:
+                                if os.path.exists(tmp_zip_path):
+                                    os.remove(tmp_zip_path)
+                            except Exception:
+                                pass
+                            # remove extraction temp dir (if media was moved, it may already be empty)
+                            try:
+                                shutil.rmtree(extract_tmp_dir, ignore_errors=True)
+                            except Exception:
+                                pass
+
+                            log_action(current_username, "full_restore", f"restored_by={current_username}")
+                            st.success("Full site restored successfully (DB + media). App will reload to use restored data.")
+                            safe_rerun()
+
+                        except Exception as e:
+                            st.error(f"Full restore failed: {e}")
+
+            st.markdown("---")
+            st.write("Note: Schema edits are not supported from this UI. Use a separate DB tool for advanced schema changes.")
+# ========================
+# End of file
+# ========================
+
+# Notes:
+# - This file includes the Admin-only Full Site Backup & Restore tools under the Admin Dashboard.
+# - To run: `streamlit run sachas_casting_manager_with_full_backup.py` from the directory containing this file.
+# - Ensure the process has write permissions to the app directory so backups and restores can write files.
+# - If you want me to also save this file as a downloadable attachment here, tell me and I'll attach it.
+

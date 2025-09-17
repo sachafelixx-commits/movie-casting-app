@@ -1658,254 +1658,172 @@ else:
                     except Exception as e:
                         st.error(f"Unable to fetch table data: {e}")
 
-          # ------------------------
-# Admin: in-memory backup + single-dataset restore (no server-stored backups)
-# ------------------------
-import io
-import zipfile
-import tempfile
-import stat
+# ---------- Diagnostic + Reliable backup (use sqlite3 backup API) ----------
+import io, zipfile, tempfile, traceback
 
-def get_db_counts_sample(db_path):
-    """Return tuple (users_count, projects_count, participants_count, sample_users) or None on error."""
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        def maybe_count(q):
-            try:
-                return cur.execute(q).fetchone()[0]
-            except Exception:
-                return None
-        users = maybe_count("SELECT COUNT(*) FROM users")
-        projects = maybe_count("SELECT COUNT(*) FROM projects")
-        participants = maybe_count("SELECT COUNT(*) FROM participants")
+st.markdown("---")
+st.subheader("🔎 Live DB Diagnostic & Reliable Backup (Admin)")
+
+# Helper: show counts from a connection or a DB file
+def counts_from_conn(conn):
+    cur = conn.cursor()
+    def safe(q):
         try:
-            sample = [dict(r) for r in cur.execute("SELECT id,username,role,last_login FROM users ORDER BY id LIMIT 10").fetchall()]
+            return cur.execute(q).fetchone()[0]
         except Exception:
-            sample = []
-        conn.close()
-        return users, projects, participants, sample
+            return None
+    users = safe("SELECT COUNT(*) FROM users")
+    projects = safe("SELECT COUNT(*) FROM projects")
+    participants = safe("SELECT COUNT(*) FROM participants")
+    # sample
+    sample = []
+    try:
+        cur.execute("SELECT id, username, role, last_login FROM users ORDER BY id LIMIT 10")
+        sample = [dict(r) for r in cur.fetchall()]
     except Exception:
-        return None
+        sample = []
+    return users, projects, participants, sample
 
-def create_backup_zip_in_memory():
-    """
-    Create a zip (bytes) containing:
-      - data.db (if exists)
-      - media/ folder (if exists)
-      - manifest.json (counts + timestamp)
-    Does NOT write anything to disk (except transient reads).
-    """
-    bio = io.BytesIO()
-    manifest = {"created_at": datetime.now().isoformat(), "db_path": os.path.abspath(DB_FILE)}
-    counts = get_db_counts_sample(DB_FILE)
-    if counts:
-        users_cnt, proj_cnt, part_cnt, sample_users = counts
-    else:
-        users_cnt = proj_cnt = part_cnt = None
-        sample_users = []
-    manifest.update({
-        "users_count": users_cnt,
-        "projects_count": proj_cnt,
-        "participants_count": part_cnt,
-        "sample_users": sample_users
-    })
-    with zipfile.ZipFile(bio, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # add DB
-        if os.path.exists(DB_FILE):
-            zf.write(DB_FILE, arcname="data.db")
-        # add media recursively
-        if os.path.exists(MEDIA_DIR):
-            for root, dirs, files in os.walk(MEDIA_DIR):
-                for f in files:
-                    full = os.path.join(root, f)
-                    rel = os.path.relpath(full, MEDIA_DIR)
-                    zf.write(full, arcname=os.path.join("media", rel))
-        # add manifest
-        zf.writestr("manifest.json", json.dumps(manifest, default=str, indent=2))
-    bio.seek(0)
-    return bio, manifest
+# 1) Live connection info (the app's active connection)
+st.markdown("### 1) Live (in-memory) DB connection — counts your app is currently using")
+try:
+    # get_db_conn is your cached resource (from the main file). Use it to inspect the live DB.
+    live_conn = get_db_conn()
+    live_info = counts_from_conn(live_conn)
+    st.write("Live counts (via `get_db_conn()`):")
+    st.write(f"- Users: **{live_info[0]}**, Projects: **{live_info[1]}**, Participants: **{live_info[2]}**")
+    if live_info[3]:
+        st.write("Sample users (live):")
+        st.table(live_info[3])
+except Exception as e:
+    st.error(f"Unable to read live connection: {e}\n{traceback.format_exc()}")
 
-def atomic_copy_with_fsync(src_path, dst_path):
-    """
-    Robust copy: write to tmp file in same dir as dst_path, fsync, then os.replace.
-    If replace fails, fallback to copyfile + fsync.
-    """
-    dst_dir = os.path.dirname(os.path.abspath(dst_path)) or "."
+# 2) On-disk DB file info
+st.markdown("### 2) On-disk DB file info (the file DB_FILE points to)")
+abs_db = os.path.abspath(DB_FILE)
+st.write("DB_FILE path:", abs_db)
+try:
+    s = os.stat(abs_db)
+    st.write("File size (bytes):", s.st_size)
+    st.write("Modified:", datetime.fromtimestamp(s.st_mtime).isoformat())
+    # Try opening disk DB directly (this is the simple check that used to be done by naive backups)
     try:
-        with tempfile.NamedTemporaryFile(dir=dst_dir, prefix=".tmpdb_", delete=False) as tf:
-            tmp_path = tf.name
-            with open(src_path, "rb") as sf:
-                shutil.copyfileobj(sf, tf)
-            tf.flush()
-            os.fsync(tf.fileno())
+        disk_conn = sqlite3.connect(abs_db)
+        disk_conn.row_factory = sqlite3.Row
+        disk_info = counts_from_conn(disk_conn)
+        disk_conn.close()
+        st.write("Counts when opening the on-disk `data.db` file directly:")
+        st.write(f"- Users: **{disk_info[0]}**, Projects: **{disk_info[1]}**, Participants: **{disk_info[2]}**")
+        if disk_info[3]:
+            st.write("Sample users (from file):")
+            st.table(disk_info[3])
+    except Exception as e:
+        st.warning(f"Could not open on-disk DB directly: {e}")
+except Exception as e:
+    st.warning(f"DB file not found or unreadable: {e}")
+
+# 3) List other .db files in app directory (to detect multiple DBs)
+st.markdown("### 3) Other .db files in app dir (possible alternate DBs)")
+db_dir = os.path.dirname(abs_db) or "."
+try:
+    files = sorted(os.listdir(db_dir))
+    db_files = [f for f in files if f.lower().endswith(".db") or f.lower().endswith(".sqlite")]
+    st.write("Detected DB-like files:", db_files)
+    # preview counts for each found DB file (best-effort)
+    previews = {}
+    for f in db_files:
+        p = os.path.join(db_dir, f)
         try:
-            os.replace(tmp_path, dst_path)
-            return True, None
-        except Exception as e_replace:
-            # fallback
-            try:
-                shutil.copyfile(tmp_path, dst_path)
-                with open(dst_path, "rb+") as df:
-                    df.flush()
-                    os.fsync(df.fileno())
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-                return True, None
-            except Exception as e_copy:
-                return False, f"replace_err:{e_replace} copy_err:{e_copy}"
-    except Exception as e:
-        return False, str(e)
+            conn_tmp = sqlite3.connect(p)
+            conn_tmp.row_factory = sqlite3.Row
+            previews[f] = counts_from_conn(conn_tmp)
+            conn_tmp.close()
+        except Exception as e:
+            previews[f] = f"error: {e}"
+    st.write("Counts per DB file (filename: (users, projects, participants, sample users))")
+    st.json(previews)
+except Exception as e:
+    st.warning(f"Unable to list app directory: {e}")
 
-st.markdown("---")
-st.subheader("🗄 Single-dataset Backup & Restore (Admin only)")
+# 4) Reliable backup builder (uses sqlite3.Connection.backup to capture WAL)
+st.markdown("### 4) Create a reliable backup (this uses SQLite backup API to include WAL contents)")
 
-# In-memory backup (download only)
-st.markdown("**Download full site backup (won't be stored on the server)**")
-if st.button("Create & Download Backup"):
+def build_reliable_backup_bytes():
+    """
+    - Uses the live (cached) connection as source and sqlite3 backup API to copy into a temporary DB file.
+    - Zips that temp DB + media folder into a BytesIO and returns (bytes_io, manifest_dict).
+    """
+    db_dir = os.path.dirname(os.path.abspath(DB_FILE)) or "."
+    # create temp file in same directory to avoid cross-device issues when using atomic moves (not stored permanently)
+    tmp_db_fd, tmp_db_path = tempfile.mkstemp(prefix="backup_copy_", suffix=".db", dir=db_dir)
+    os.close(tmp_db_fd)
     try:
-        bio, manifest = create_backup_zip_in_memory()
-        # present manifest so admin can confirm contents before downloading
+        # source = live connection
+        src_conn = get_db_conn()
+        # dest conn
+        dest_conn = sqlite3.connect(tmp_db_path)
+        try:
+            # use the backup API (this copies active DB including WAL transactions)
+            src_conn.backup(dest_conn, pages=0)  # pages=0 means copy all
+            dest_conn.commit()
+        finally:
+            dest_conn.close()
+
+        # Now open the copied DB to read counts (verification)
+        verify_conn = sqlite3.connect(tmp_db_path)
+        verify_conn.row_factory = sqlite3.Row
+        users_cnt, projects_cnt, participants_cnt, sample_users = counts_from_conn(verify_conn)
+        verify_conn.close()
+
+        # Build zip in-memory
+        bio = io.BytesIO()
+        manifest = {
+            "created_at": datetime.now().isoformat(),
+            "db_path": os.path.abspath(DB_FILE),
+            "users_count": users_cnt,
+            "projects_count": projects_cnt,
+            "participants_count": participants_cnt,
+            "sample_users": sample_users
+        }
+        with zipfile.ZipFile(bio, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.write(tmp_db_path, arcname="data.db")
+            # add media folder if present
+            if os.path.exists(MEDIA_DIR):
+                for root, dirs, files in os.walk(MEDIA_DIR):
+                    for fname in files:
+                        full = os.path.join(root, fname)
+                        rel = os.path.relpath(full, MEDIA_DIR)
+                        zf.write(full, arcname=os.path.join("media", rel))
+            zf.writestr("manifest.json", json.dumps(manifest, default=str, indent=2))
+        bio.seek(0)
+        return bio, manifest
+    finally:
+        # ensure temp copy removed
+        try:
+            if os.path.exists(tmp_db_path):
+                os.remove(tmp_db_path)
+        except Exception:
+            pass
+
+if st.button("Create reliable in-memory backup (downloadable)"):
+    try:
+        bio, manifest = build_reliable_backup_bytes()
+        st.success("Built backup successfully (this method includes WAL contents). Manifest:")
         st.json(manifest)
-        st.download_button(
-            label="📥 Download backup (.zip) — this will not be saved on the server",
-            data=bio,
-            file_name=f"site_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-            mime="application/zip"
-        )
+        st.download_button("📥 Download reliable backup (zip)", data=bio, file_name=f"reliable_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", mime="application/zip")
     except Exception as e:
-        st.error(f"Unable to build backup in memory: {e}")
+        st.error(f"Failed to build reliable backup: {e}\n{traceback.format_exc()}")
 
-st.markdown("---")
-st.markdown("**Restore: upload a backup ZIP and replace the single active dataset (destructive)**")
-st.write("Upload a backup zip created by the tool above. The app will preview `data.db` inside the zip. After you explicitly confirm, it will replace the current `data.db` **and** the `media/` folder. No backups or copies will be left on the server.")
+st.markdown("### What to check next")
+st.write("""
+1. First press **Create reliable in-memory backup** and check the `manifest` counts shown.  
+   - If the manifest shows `projects` equal to the number you expect (e.g. 4), then this backup method is correct and your previous backup method was missing WAL.  
+   - If the manifest still shows fewer projects than expected, check the **Live counts** at the top: if Live counts already show fewer projects, the data was not present in the running app memory either (we'll need to inspect how/when projects got removed).  
+2. If `Live counts` show the correct number but the manifest does not, paste both outputs here (Live counts and manifest).  
+3. If `Live counts` are already missing projects, tell me what action you performed earlier (deleted, migrated, restored) and we will look in any `.bak` files or logs (the app writes `logs` table) to trace when/why projects were removed.
+""")
+# ---------- end block ----------
 
-uploaded = st.file_uploader("Upload backup .zip to restore (admin only)", type=["zip"])
-if uploaded is not None:
-    try:
-        # write uploaded bytes to a temp file inside DB dir to avoid cross-device issues
-        db_dir = os.path.dirname(os.path.abspath(DB_FILE)) or "."
-        os.makedirs(db_dir, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=db_dir, prefix="upload_tmp_", suffix=".zip", delete=False) as tf:
-            tmp_zip_path = tf.name
-            uploaded.seek(0)
-            data = uploaded.read()
-            tf.write(data)
-            tf.flush()
-            os.fsync(tf.fileno())
-
-        # extract to temp dir inside DB dir
-        extract_dir = tempfile.mkdtemp(dir=db_dir, prefix="restore_extract_")
-        with zipfile.ZipFile(tmp_zip_path, "r") as zf:
-            zf.extractall(path=extract_dir)
-
-        # locate a .db file within extracted contents
-        extracted_db_candidates = []
-        for root, _, files in os.walk(extract_dir):
-            for f in files:
-                if f.lower().endswith(".db"):
-                    extracted_db_candidates.append(os.path.join(root, f))
-
-        if not extracted_db_candidates:
-            st.error("No .db file found inside uploaded zip. Abort.")
-            # clean up
-            try: os.remove(tmp_zip_path)
-            except Exception: pass
-            try: shutil.rmtree(extract_dir, ignore_errors=True)
-            except Exception: pass
-        else:
-            # pick the first .db found (common case: data.db at top level)
-            candidate_db = extracted_db_candidates[0]
-            st.markdown("### Preview of uploaded DB")
-            preview = get_db_counts_sample(candidate_db)
-            if preview:
-                u_cnt, p_cnt, pa_cnt, sample_users = preview
-                st.write(f"- Users: **{u_cnt}**, Projects: **{p_cnt}**, Participants: **{pa_cnt}**")
-                if sample_users:
-                    st.write("Sample users:")
-                    st.table(sample_users)
-            else:
-                st.warning("Could not open the DB for preview; it may be corrupted or incompatible.")
-
-            st.warning("Restoring will DELETE the current `media/` folder and replace `data.db` with the uploaded one. This is destructive and irreversible on the server.")
-            confirm = st.text_input("Type 'REPLACE' to confirm you want to overwrite the active dataset", key="confirm_replace_input")
-            if confirm == "REPLACE":
-                if st.button("Perform destructive restore now"):
-                    try:
-                        # Replace DB atomically (copy with fsync)
-                        ok, err = atomic_copy_with_fsync(candidate_db, DB_FILE)
-                        if not ok:
-                            raise RuntimeError(f"Failed to install DB: {err}")
-
-                        # Replace media (if extracted media exists)
-                        extracted_media_dir = os.path.join(extract_dir, "media")
-                        if os.path.exists(extracted_media_dir):
-                            # remove current media completely
-                            try:
-                                if os.path.exists(MEDIA_DIR):
-                                    shutil.rmtree(MEDIA_DIR)
-                            except Exception:
-                                # attempt best-effort; continue on failure
-                                pass
-                            # move extracted media into place (move is fine since on same fs)
-                            try:
-                                shutil.move(extracted_media_dir, MEDIA_DIR)
-                            except Exception:
-                                # fallback to copytree
-                                shutil.copytree(extracted_media_dir, MEDIA_DIR)
-                                try:
-                                    shutil.rmtree(extracted_media_dir, ignore_errors=True)
-                                except Exception:
-                                    pass
-                        else:
-                            # No media included in zip: delete existing media to ensure single dataset
-                            try:
-                                if os.path.exists(MEDIA_DIR):
-                                    shutil.rmtree(MEDIA_DIR)
-                            except Exception:
-                                pass
-
-                        # Clean up temp files (no backups left)
-                        try: os.remove(tmp_zip_path)
-                        except Exception: pass
-                        try: shutil.rmtree(extract_dir, ignore_errors=True)
-                        except Exception: pass
-
-                        # Clear cached DB connections so the new DB is used immediately
-                        try:
-                            st.cache_resource.clear()
-                        except Exception:
-                            pass
-
-                        # Verify by re-opening DB
-                        verification = get_db_counts_sample(DB_FILE)
-                        st.success("Restore completed. Verification (live DB):")
-                        if verification:
-                            vu, vp, vpa, vsample = verification
-                            st.write(f"- Users: **{vu}**, Projects: **{vp}**, Participants: **{vpa}**")
-                            if vsample:
-                                st.write("Sample users (live):")
-                                st.table(vsample)
-                        else:
-                            st.warning("Could not verify DB after restore (unable to open).")
-
-                        # final reload
-                        safe_rerun()
-                    except Exception as e:
-                        st.error(f"Restore failed: {e}")
-                        # Attempt to remove partial things
-                        try: os.remove(tmp_zip_path)
-                        except Exception: pass
-                        try: shutil.rmtree(extract_dir, ignore_errors=True)
-                        except Exception: pass
-            else:
-                st.info("Type 'REPLACE' exactly to enable the restore button.")
-
-    except Exception as e:
-        st.error(f"Error processing uploaded backup: {e}")
 
 # ========================
 # End of file

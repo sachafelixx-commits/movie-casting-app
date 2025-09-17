@@ -1587,7 +1587,19 @@ else:
                             safe_rerun()
                         except Exception as e:
                             st.error(f"Unable to delete user: {e}")
+                          
+# Only show admin UI if the user is logged-in and is Admin
+if st.session_state.get("logged_in") and st.session_state.get("current_user"):
+    # make sure `role` is defined here by reading the DB or session
+    try:
+        role = None
+        with db_connect() as _conn:
+            row = get_user_by_username(_conn, st.session_state["current_user"])
+            role = row["role"] if row else None
+    except Exception:
+        role = None
 
+    if role == "Admin":
             # ------------------------
             # Database Manager (Admin-only)
             # ------------------------

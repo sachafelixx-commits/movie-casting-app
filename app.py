@@ -1032,8 +1032,7 @@ else:
                     if cancel_delete:
                         st.session_state["confirm_delete_project"] = None
                         safe_rerun()
-
-       # =========================
+# =========================
 # SESSIONS manager (restore full sessions UI)
 # =========================
 st.header("🗂 Sessions")
@@ -1182,21 +1181,6 @@ if view_sid:
                 else:
                     pcols[0].write("—")
                 pcols[1].markdown(f\"**{p.get('name') or '—'}**\\n{p.get('role') or ''}\\n{p.get('agency') or ''}\")\n                remove_key = f\"remove_part_{view_sid}_{p['id']}\"\n                if pcols[2].button(\"Remove\", key=remove_key):\n                    try:\n                        with db_transaction() as conn:\n                            remove_participant_from_session(conn, view_sid, p[\"id\"])\n                            log_action(current_username, \"remove_participant_from_session\", f\"sess={view_sid} pid={p['id']}\")\n                        st.success(\"Participant removed from session\")\n                        safe_rerun()\n                    except Exception as e:\n                        st.error(f\"Unable to remove participant: {e}\")\n                # quick view / download photo\n                if pcols[3].button(\"Download Photo\", key=f\"dlphoto_{p['id']}\"):\n                    pb = get_photo_bytes(p.get(\"photo_path\"))\n                    if pb:\n                        try:\n                            st.download_button(label=f\"Download {p.get('name')}\", data=pb, file_name=f\"{_sanitize_for_path(p.get('name') or str(p['id']))}.jpg\")\n                        except Exception:\n                            st.info(\"Unable to create download; file may be too large or missing.\")\n                    else:\n                        st.info(\"No photo available for this participant\")\n\n        st.markdown(\"---\")\n        st.subheader(\"Add participants to this session\")\n        # allow multi-select of participants not already in the session\n        available = [p for p in project_participants if p['id'] not in session_part_ids]\n        options = { f\"{p['name']} ({p.get('number') or ''}) — id:{p['id']}\": p['id'] for p in available }\n        if options:\n            chosen = st.multiselect(\"Select participants to add\", list(options.keys()))\n            add_btn = st.button(\"Add selected to session\")\n            if add_btn and chosen:\n                try:\n                    with db_transaction() as conn:\n                        for label in chosen:\n                            pid = options[label]\n                            add_participant_to_session(conn, view_sid, pid)\n                            log_action(current_username, \"add_participant_to_session\", f\"sess={view_sid} pid={pid}\")\n                    st.success(\"Selected participants added to session\")\n                    safe_rerun()\n                except Exception as e:\n                    st.error(f\"Unable to add participants: {e}\")\n        else:\n            st.info(\"No available participants to add (all are already in the session or none exist)\")\n\n        st.markdown(\"---\")\n        st.subheader(\"Bulk operations\")\n        all_session_ids = [r[0] for r in session_rows]\n        if all_session_ids:\n            target = st.selectbox(\"Target session (for move/copy)\", [s for s in all_session_ids if s != view_sid] or [None])\n            action = st.selectbox(\"Action\", [\"move\", \"copy\"])\n            sel_pids = st.multiselect(\"Choose participant IDs to move/copy\", [p['id'] for p in project_participants], format_func=lambda x: str(x))\n            if st.button(\"Perform bulk operation\"):\n                if not target:\n                    st.error(\"No target session chosen\")\n                elif not sel_pids:\n                    st.error(\"No participants selected\")\n                else:\n                    try:\n                        with db_transaction() as conn:\n                            res = bulk_move_copy_participants(conn, sel_pids, int(target), action=action)\n                            log_action(current_username, f\"bulk_{action}_participants\", f\"from={view_sid} to={target} pids={sel_pids}\")\n                        st.success(f\"Bulk {action} completed: {res}\")\n                        safe_rerun()\n                    except Exception as e:\n                        st.error(f\"Bulk op failed: {e}\")\n        else:\n            st.info(\"No other sessions to target for bulk move/copy\")\n```
-
-Notes / behavior
-- This UI:
-  - Lets you create/edit/delete sessions for the active project.
-  - Lets you view a session, see participants, remove participants from the session.
-  - Lets you add participants from the project's participant pool to the session (multi-select).
-  - Supports bulk move/copy of participants between sessions via the existing helper `bulk_move_copy_participants`.
-  - Uses `db_transaction()` everywhere for safe commits and `log_action()` for audit.
-- It assumes `st.session_state["current_project_name"]` is set (your project manager already maintains that).
-- If you'd like:
-  - I can also add CSV export of session participant lists.
-  - Or add a "reassign owner" function to reassign projects to another username (useful occasionally).
-  - Or automatically create a default session when a project is created.
-
-If you'd prefer, I can insert this block into the canvas file I created earlier and attach the updated `.py` for download. Which would you like?
 
         # ------------------------
         # Admin Dashboard: only render if role is Admin

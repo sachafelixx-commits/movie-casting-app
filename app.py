@@ -1878,83 +1878,6 @@ else:
                                             st.table(compact)
                                     safe_rerun()
 
-# --- AUTO: ensure restored DB sessions & participants are visible in UI ---
-try:
-    # best-effort: close cached DB connection so new DB is used
-    try:
-        conn_cached = get_db_conn()
-        try:
-            conn_cached.close()
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-    # clear resource caches
-    try:
-        st.cache_resource.clear()
-    except Exception:
-        pass
-
-    # slight pause to let filesystem settle
-    try:
-        time.sleep(0.15)
-    except Exception:
-        pass
-
-    # ensure 'time' and 'sqlite3' are available; if not, import locally
-    try:
-        import sqlite3 as _sqlite3  # noqa: F401
-    except Exception:
-        pass
-
-    # open restored DB and pick a sensible session to view
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-
-        # If there are sessions tied to a project, pick the first session of the first project
-        cur.execute("SELECT id FROM projects ORDER BY id LIMIT 1")
-        proj = cur.fetchone()
-        if proj:
-            proj_id = proj["id"]
-            # clear any stale current project/session in session_state
-            st.session_state.pop("current_project_name", None)
-            st.session_state.pop("current_project_id", None)
-            st.session_state.pop("viewing_session_id", None)
-            # set current project by id (and name if available)
-            cur.execute("SELECT name FROM projects WHERE id=?", (proj_id,))
-            prow = cur.fetchone()
-            if prow:
-                st.session_state["current_project_id"] = proj_id
-                st.session_state["current_project_name"] = prow["name"]
-
-            # find any session for that project and set it as viewing_session_id
-            cur.execute("SELECT id FROM sessions WHERE project_id=? ORDER BY id LIMIT 1", (proj_id,))
-            srow = cur.fetchone()
-            if srow:
-                st.session_state["viewing_session_id"] = srow["id"]
-                st.write(f\"✅ Restored and set active session id={srow['id']} for project id={proj_id}\")
-            else:
-                st.write(\"⚠️ Restored DB contains projects but no sessions for the first project.\")
-        else:
-            st.session_state.pop(\"current_project_name\", None)
-            st.session_state.pop(\"current_project_id\", None)
-            st.session_state.pop(\"viewing_session_id\", None)
-            st.write(\"⚠️ Restore completed but no projects found in restored DB.\")
-        conn.close()
-    except Exception as e:
-        st.error(f\"Warning while trying to set active session from restored DB: {e}\")
-except Exception:
-    pass
-# --- END AUTO BLOCK ---
-
-# Force a rerun so UI picks up the new session_state and DB
-try:
-    safe_rerun()
-except Exception:
-    pass
                                 except Exception as e:
                                     st.error(f"Restore failed: {e}\n{traceback.format_exc()}")
                                     try: os.remove(tmp_zip_path)
@@ -1976,5 +1899,6 @@ except Exception:
 # - Admin UI now lives inside render_admin_dashboard() and is called only when the logged-in user has role 'Admin'.
 # - Paste this file into your app directory and run: streamlit run sachas_casting_manager_admin_fixed.py
 # - If you want me to attach this .py as a downloadable file here, tell me and I'll add it.
+
 
 

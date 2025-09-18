@@ -1,4 +1,5 @@
 
+
 # sachas_casting_manager_admin_fixed.py
 # Sacha's Casting Manager — Admin UI fixed so admin tools only render after login
 # Complete app file with admin dashboard moved behind login+role guard.
@@ -1449,89 +1450,6 @@ else:
             except Exception as e:
                 st.error(f"Unable to generate Word file: {e}")
 
-        # Admin dashboard unchanged but visible to Admin
-        if role == "Admin":
-            st.header("👑 Admin Dashboard")
-            if st.button("🔄 Refresh Users"):
-                safe_rerun()
-
-            with db_connect() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT * FROM users ORDER BY username COLLATE NOCASE")
-                users_rows = cur.fetchall()
-
-            ucol1, ucol2 = st.columns([3,2])
-            with ucol1:
-                uquery = st.text_input("Search accounts by username or role")
-            with ucol2:
-                urole_filter = st.selectbox("Filter role", ["All", "Admin", "Casting Director", "Assistant"], index=0)
-
-            uhdr = st.columns([3,2,3,3,4])
-            uhdr[0].markdown("**Username**"); uhdr[1].markdown("**Role**"); uhdr[2].markdown("**Last Login**"); uhdr[3].markdown("**Projects**"); uhdr[4].markdown("**Actions**")
-
-            for u in users_rows:
-                uname = u["username"]
-                urole = u["role"]
-                last = u["last_login"]
-                with db_connect() as conn:
-                    cur = conn.cursor()
-                    cur.execute("SELECT name FROM projects WHERE user_id=? ORDER BY name COLLATE NOCASE", (u["id"],))
-                    pr = [r["name"] for r in cur.fetchall()]
-                projlist = ", ".join(pr)
-
-                if uquery and uquery.lower() not in uname.lower() and uquery.lower() not in (urole or "").lower():
-                    continue
-                if urole_filter != "All" and urole != urole_filter:
-                    continue
-
-                cols = st.columns([3,2,3,3,4])
-                cols[0].markdown(f"**{uname}**")
-                role_sel = cols[1].selectbox(f"role_sel_{uname}", ["Admin","Casting Director","Assistant"], index=["Admin","Casting Director","Assistant"].index(urole) if urole in ["Admin","Casting Director","Assistant"] else 1, key=f"role_sel_{uname}")
-                cols[2].markdown(last or "—")
-                cols[3].markdown(projlist or "—")
-
-                a1,a2 = cols[4].columns([1,1])
-                if a1.button("Save Role", key=f"saverole_{uname}"):
-                    try:
-                        with db_transaction() as conn:
-                            conn.execute("UPDATE users SET role=? WHERE username=?", (role_sel, uname))
-                            log_action(current_username, "change_role", f"{uname} -> {role_sel}")
-                        st.success(f"Role updated for {uname}.")
-                        safe_rerun()
-                    except Exception as e:
-                        st.error(f"Unable to change role: {e}")
-
-                if a2.button("Delete", key=f"deluser_{uname}"):
-                    if uname == "admin":
-                        st.error("Cannot delete the built-in admin.")
-                    else:
-                        try:
-                            user_media = os.path.join(MEDIA_DIR, _sanitize_for_path(uname))
-                            if os.path.exists(user_media):
-                                shutil.rmtree(user_media)
-                        except Exception:
-                            pass
-                        try:
-                            with db_transaction() as conn:
-                                cur = conn.cursor()
-                                cur.execute("SELECT id FROM users WHERE username=?", (uname,))
-                                r = cur.fetchone()
-                                if r:
-                                    uid = r["id"]
-                                    cur.execute("SELECT photo_path FROM participants WHERE project_id IN (SELECT id FROM projects WHERE user_id=?)", (uid,))
-                                    for rr in cur.fetchall():
-                                        pf = rr["photo_path"]
-                                        if isinstance(pf, str) and os.path.exists(pf):
-                                            remove_media_file(pf)
-                                    cur.execute("DELETE FROM participants WHERE project_id IN (SELECT id FROM projects WHERE user_id=?)", (uid,))
-                                    cur.execute("DELETE FROM projects WHERE user_id=?", (uid,))
-                                    cur.execute("DELETE FROM users WHERE id=?", (uid,))
-                                    log_action(current_username, "delete_user", uname)
-                            st.warning(f"User {uname} deleted.")
-                            safe_rerun()
-                        except Exception as e:
-                            st.error(f"Unable to delete user: {e}")
-
         # ------------------------
         # Admin Dashboard: only render if role is Admin
         # ------------------------
@@ -1980,3 +1898,4 @@ else:
 # - Admin UI now lives inside render_admin_dashboard() and is called only when the logged-in user has role 'Admin'.
 # - Paste this file into your app directory and run: streamlit run sachas_casting_manager_admin_fixed.py
 # - If you want me to attach this .py as a downloadable file here, tell me and I'll add it.
+

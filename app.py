@@ -1033,79 +1033,115 @@ else:
                         st.session_state["confirm_delete_project"] = None
                         safe_rerun()
 # =========================
-# SESSIONS manager (restore full sessions UI)
+# SESSIONS manager (full block — drop-in)
 # =========================
+import datetime as _dt
+
 st.header("🗂 Sessions")
 
-# ensure we have the active project object
-with db_connect() as conn:
-    proj = get_project_by_name(conn, user_id, st.session_state.get("current_project_name") or DEFAULT_PROJECT_NAME)
+# Resolve active project safely
+try:
+    conn_tmp = db_connect()
+    proj = get_project_by_name(conn_tmp, user_id, st.session_state.get("current_project_name") or DEFAULT_PROJECT_NAME)
+    conn_tmp.close()
     active_project_id = proj["id"] if proj else None
+except Exception as e:
+    active_project_id = None
+    st.error(f"Unable to determine active project: {e}")
 
 # Create session form
 with st.expander("➕ Create New Session", expanded=False):
-    with st.form("new_session_form"):
-        s_name = st.text_input("Session name")
-        s_date = st.date_input("Session date", value=None)
-        s_desc = st.text_area("Description", height=80)
+    form_key = f"new_session_form_{user_id}_{int(time.time())}"
+    with st.form(form_key):
+        s_name = st.text_input("Session name", key=f"sname_{form_key}")
+        # default date to today to avoid None issues
+        try:
+            default_date = _dt.date.today()
+        except Exception:
+            default_date = None
+        s_date = st.date_input("Session date", value=default_date, key=f"sdate_{form_key}")
+        s_desc = st.text_area("Description", height=80, key=f"sdesc_{form_key}")
         create_sess = st.form_submit_button("Create Session")
         if create_sess:
             if not s_name:
                 st.error("Provide a session name")
             elif not active_project_id:
-                st.error("Active project not found")
+                st.error("Active project not found — set an active project first")
             else:
                 try:
+                    date_iso = s_date.isoformat() if isinstance(s_date, _dt.date) else None
                     with db_transaction() as conn:
-                        create_session(conn, active_project_id, s_name, s_date.isoformat() if s_date else None, s_desc or "")
+                        create_session(conn, active_project_id, s_name, date_iso, s_desc or "")
                         log_action(current_username, "create_session", f"{s_name} @ project_id={active_project_id}")
                     st.success(f"Session '{s_name}' created.")
                     safe_rerun()
                 except Exception as e:
                     st.error(f"Unable to create session: {e}")
 
-# Load sessions for project
-conn_read = get_db_conn()
-sessions = list_sessions_for_project(conn_read, active_project_id) if active_project_id else []
+# Load sessions for project (fresh)
+try:
+    conn_read = get_db_conn()
+    sessions = list_sessions_for_project(conn_read, active_project_id) if active_project_id else []
+except Exception as e:
+    sessions = []
+    st.error(f"Unable to load sessions: {e}")
+
 session_rows = [(s["id"], s["name"], s.get("date"), s.get("description"), s.get("created_at")) for s in sessions]
 
-# UI: Sessions list and actions
+# Sessions list UI
 if not session_rows:
     st.info("No sessions yet for this project.")
 else:
     st.subheader("Sessions for active project")
     for sid, sname, sdate, sdesc, screated in session_rows:
-        col1, col2, col3 = st.columns([4,2,4])
-        col1.markdown(f"**{sname}**")
-        col2.markdown(sdate.split('T')[0] if sdate else "—")
-        col3.markdown(sdesc or "—")
-        btn_view, btn_edit, btn_delete = st.columns([1,1,1])
-        if btn_view.button("View", key=f"view_sess_{sid}"):
-            st.session_state["viewing_session_id"] = sid
-            safe_rerun()
-        if btn_edit.button("Edit", key=f"edit_sess_{sid}"):
-            # inline edit modal via form
-            st.session_state["editing_session_id"] = sid
-            safe_rerun()
-        if btn_delete.button("Delete", key=f"del_sess_{sid}"):
-            st.session_state["confirm_delete_session"] = sid
-            safe_rerun()
+        try:
+            col1, col2, col3 = st.columns([4,2,4])
+            col1.markdown(f"**{sname}**")
+            # safe date display
+            try:
+                ds = (sdate.split('T')[0]) if isinstance(sdate, str) else (str(sdate) if sdate else "—")
+            except Exception:
+                ds = str(sdate) if sdate else "—"
+            col2.markdown(ds)
+            col3.markdown(sdesc or "—")
+            btn_view, btn_edit, btn_delete = st.columns([1,1,1])
+            if btn_view.button("View", key=f"view_sess_{sid}"):
+                st.session_state["viewing_session_id"] = sid
+                safe_rerun()
+            if btn_edit.button("Edit", key=f"edit_sess_{sid}"):
+                st.session_state["editing_session_id"] = sid
+                safe_rerun()
+            if btn_delete.button("Delete", key=f"del_sess_{sid}"):
+                st.session_state["confirm_delete_session"] = sid
+                safe_rerun()
+        except Exception as e:
+            st.error(f"Rendering session {sid} failed: {e}")
 
         # Inline edit form
         if st.session_state.get("editing_session_id") == sid:
             with st.form(f"edit_session_form_{sid}"):
-                new_name = st.text_input("Session name", value=sname)
+                new_name = st.text_input("Session name", value=sname, key=f"edit_name_{sid}")
+                # try to parse existing date safely
+                parsed_date = None
                 try:
-                    new_date = st.date_input("Session date", value=(sdate.split("T")[0] if sdate else None))
+                    if isinstance(sdate, str) and sdate:
+                        parsed_date = _dt.date.fromisoformat(sdate.split("T")[0])
+                    elif isinstance(sdate, _dt.date):
+                        parsed_date = sdate
                 except Exception:
-                    new_date = None
-                new_desc = st.text_area("Description", value=sdesc or "", height=120)
+                    parsed_date = _dt.date.today()
+                try:
+                    new_date = st.date_input("Session date", value=parsed_date, key=f"edit_date_{sid}")
+                except Exception:
+                    new_date = parsed_date
+                new_desc = st.text_area("Description", value=sdesc or "", height=120, key=f"edit_desc_{sid}")
                 save_s = st.form_submit_button("Save")
                 cancel_s = st.form_submit_button("Cancel")
                 if save_s:
                     try:
+                        date_iso = new_date.isoformat() if isinstance(new_date, _dt.date) else None
                         with db_transaction() as conn:
-                            update_session(conn, sid, new_name, new_date.isoformat() if new_date else None, new_desc)
+                            update_session(conn, sid, new_name, date_iso, new_desc)
                             log_action(current_username, "edit_session", f"{sid}")
                         st.success("Session updated.")
                         st.session_state["editing_session_id"] = None
@@ -1120,7 +1156,7 @@ else:
         if st.session_state.get("confirm_delete_session") == sid:
             st.warning(f"Type session name **{sname}** to confirm deletion. This cannot be undone.")
             with st.form(f"confirm_delete_session_{sid}"):
-                confirm_text = st.text_input("Confirm session name")
+                confirm_text = st.text_input("Confirm session name", key=f"confirm_name_{sid}")
                 d_yes = st.form_submit_button("Delete Permanently")
                 d_no = st.form_submit_button("Cancel")
                 if d_yes:
@@ -1147,8 +1183,13 @@ view_sid = st.session_state.get("viewing_session_id")
 if view_sid:
     st.markdown("---")
     st.subheader("Session details")
-    with db_connect() as conn:
-        sess = get_session_by_id(conn, view_sid)
+    try:
+        with db_connect() as conn:
+            sess = get_session_by_id(conn, view_sid)
+    except Exception as e:
+        sess = None
+        st.error(f"Unable to load session: {e}")
+
     if not sess:
         st.error("Session not found.")
         st.session_state["viewing_session_id"] = None
@@ -1157,45 +1198,130 @@ if view_sid:
         st.markdown(sess.get("description") or "*No description*")
 
         # participants in project (so admin/user can add into session)
-        with db_connect() as conn:
-            c = conn.cursor()
-            c.execute("SELECT * FROM participants WHERE project_id=? ORDER BY name COLLATE NOCASE", (active_project_id,))
-            project_participants = [dict(r) for r in c.fetchall()]
+        try:
+            with db_connect() as conn:
+                c = conn.cursor()
+                c.execute("SELECT * FROM participants WHERE project_id=? ORDER BY name COLLATE NOCASE", (active_project_id,))
+                project_participants = [dict(r) for r in c.fetchall()]
+        except Exception as e:
+            project_participants = []
+            st.error(f"Unable to load project participants: {e}")
 
         # participants currently in this session
-        session_participants = participants_in_session(get_db_conn(), view_sid)
-        session_part_ids = [p["id"] for p in session_participants]
+        try:
+            session_participants = participants_in_session(get_db_conn(), view_sid)
+            session_part_ids = [p["id"] for p in session_participants]
+        except Exception as e:
+            session_participants = []
+            session_part_ids = []
+            st.error(f"Unable to load session participants: {e}")
 
         st.markdown("**Participants in this session**")
         if not session_participants:
             st.info("No participants in this session yet.")
         else:
             for p in session_participants:
-                pcols = st.columns([1,4,2,2])
-                thumb = thumb_path_for(p.get("photo_path")) or None
-                if thumb:
-                    try:
-                        pcols[0].image(thumb, width=80)
-                    except Exception:
-                        pcols[0].write("No image")
+                try:
+                    pcols = st.columns([1,4,2,2])
+
+                    # thumbnail / image
+                    thumb = thumb_path_for(p.get("photo_path")) or None
+                    if thumb:
+                        try:
+                            pcols[0].image(thumb, width=80)
+                        except Exception:
+                            pcols[0].write("No image")
+                    else:
+                        pcols[0].write("—")
+
+                    # name / meta
+                    name = p.get("name") or "—"
+                    role_txt = p.get("role") or ""
+                    agency_txt = p.get("agency") or ""
+                    desc_md = f"**{name}**\n{role_txt}\n{agency_txt}"
+                    pcols[1].markdown(desc_md)
+
+                    # remove button
+                    remove_key = f"remove_part_{view_sid}_{p['id']}"
+                    if pcols[2].button("Remove", key=remove_key):
+                        try:
+                            with db_transaction() as conn:
+                                remove_participant_from_session(conn, view_sid, p["id"])
+                                log_action(current_username, "remove_participant_from_session", f"sess={view_sid} pid={p['id']}")
+                            st.success("Participant removed from session")
+                            safe_rerun()
+                        except Exception as e:
+                            st.error(f"Unable to remove participant: {e}")
+
+                    # download photo button
+                    dl_key = f"dlphoto_{p['id']}"
+                    if pcols[3].button("Download Photo", key=dl_key):
+                        pb = get_photo_bytes(p.get("photo_path"))
+                        if pb:
+                            try:
+                                st.download_button(label=f"Download {name}", data=pb, file_name=f"{_sanitize_for_path(name)}.jpg")
+                            except Exception:
+                                st.info("Unable to create download; file may be too large or missing.")
+                        else:
+                            st.info("No photo available for this participant")
+                except Exception as e:
+                    st.error(f"Error rendering participant {p.get('id')}: {e}")
+
+        st.markdown("---")
+        st.subheader("Add participants to this session")
+        # allow multi-select of participants not already in the session
+        available = [p for p in project_participants if p['id'] not in session_part_ids]
+        options = { f"{p['name']} ({p.get('number') or ''}) — id:{p['id']}": p['id'] for p in available }
+        if options:
+            chosen = st.multiselect("Select participants to add", list(options.keys()), key=f"add_sel_{view_sid}")
+            add_btn = st.button("Add selected to session", key=f"add_btn_{view_sid}")
+            if add_btn and chosen:
+                try:
+                    with db_transaction() as conn:
+                        for label in chosen:
+                            pid = options[label]
+                            add_participant_to_session(conn, view_sid, pid)
+                            log_action(current_username, "add_participant_to_session", f"sess={view_sid} pid={pid}")
+                    st.success("Selected participants added to session")
+                    safe_rerun()
+                except Exception as e:
+                    st.error(f"Unable to add participants: {e}")
+        else:
+            st.info("No available participants to add (all are already in the session or none exist)")
+
+        st.markdown("---")
+        st.subheader("Bulk operations")
+        all_session_ids = [r[0] for r in session_rows]
+        if all_session_ids:
+            # present session id -> name mapping for clarity
+            id_to_name = {r[0]: r[1] for r in sessions}
+            target_choices = [(f"{id_to_name.get(sid,'id:'+str(sid))} (id={sid})", sid) for sid in all_session_ids if sid != view_sid]
+            target = None
+            if target_choices:
+                target_label = st.selectbox("Target session (for move/copy)", [t[0] for t in target_choices], key=f"target_sel_{view_sid}")
+                # map back
+                for lbl, sid_val in target_choices:
+                    if lbl == target_label:
+                        target = sid_val
+                        break
+            action = st.selectbox("Action", ["move", "copy"], key=f"action_sel_{view_sid}")
+            sel_pids = st.multiselect("Choose participant IDs to move/copy", [p['id'] for p in project_participants], format_func=lambda x: str(x), key=f"selpids_{view_sid}")
+            if st.button("Perform bulk operation", key=f"bulk_op_{view_sid}"):
+                if not target:
+                    st.error("No target session chosen")
+                elif not sel_pids:
+                    st.error("No participants selected")
                 else:
-                    pcols[0].write("—")
-                pcols[1].markdown(f\"**{p.get('name') or '—'}**\\n{p.get('role') or ''}\\n{p.get('agency') or ''}\")\n                remove_key = f\"remove_part_{view_sid}_{p['id']}\"\n                if pcols[2].button(\"Remove\", key=remove_key):\n                    try:\n                        with db_transaction() as conn:\n                            remove_participant_from_session(conn, view_sid, p[\"id\"])\n                            log_action(current_username, \"remove_participant_from_session\", f\"sess={view_sid} pid={p['id']}\")\n                        st.success(\"Participant removed from session\")\n                        safe_rerun()\n                    except Exception as e:\n                        st.error(f\"Unable to remove participant: {e}\")\n                # quick view / download photo\n                if pcols[3].button(\"Download Photo\", key=f\"dlphoto_{p['id']}\"):\n                    pb = get_photo_bytes(p.get(\"photo_path\"))\n                    if pb:\n                        try:\n                            st.download_button(label=f\"Download {p.get('name')}\", data=pb, file_name=f\"{_sanitize_for_path(p.get('name') or str(p['id']))}.jpg\")\n                        except Exception:\n                            st.info(\"Unable to create download; file may be too large or missing.\")\n                    else:\n                        st.info(\"No photo available for this participant\")\n\n        st.markdown(\"---\")\n        st.subheader(\"Add participants to this session\")\n        # allow multi-select of participants not already in the session\n        available = [p for p in project_participants if p['id'] not in session_part_ids]\n        options = { f\"{p['name']} ({p.get('number') or ''}) — id:{p['id']}\": p['id'] for p in available }\n        if options:\n            chosen = st.multiselect(\"Select participants to add\", list(options.keys()))\n            add_btn = st.button(\"Add selected to session\")\n            if add_btn and chosen:\n                try:\n                    with db_transaction() as conn:\n                        for label in chosen:\n                            pid = options[label]\n                            add_participant_to_session(conn, view_sid, pid)\n                            log_action(current_username, \"add_participant_to_session\", f\"sess={view_sid} pid={pid}\")\n                    st.success(\"Selected participants added to session\")\n                    safe_rerun()\n                except Exception as e:\n                    st.error(f\"Unable to add participants: {e}\")\n        else:\n            st.info(\"No available participants to add (all are already in the session or none exist)\")\n\n        st.markdown(\"---\")\n        st.subheader(\"Bulk operations\")\n        all_session_ids = [r[0] for r in session_rows]\n        if all_session_ids:\n            target = st.selectbox(\"Target session (for move/copy)\", [s for s in all_session_ids if s != view_sid] or [None])\n            action = st.selectbox(\"Action\", [\"move\", \"copy\"])\n            sel_pids = st.multiselect(\"Choose participant IDs to move/copy\", [p['id'] for p in project_participants], format_func=lambda x: str(x))\n            if st.button(\"Perform bulk operation\"):\n                if not target:\n                    st.error(\"No target session chosen\")\n                elif not sel_pids:\n                    st.error(\"No participants selected\")\n                else:\n                    try:\n                        with db_transaction() as conn:\n                            res = bulk_move_copy_participants(conn, sel_pids, int(target), action=action)\n                            log_action(current_username, f\"bulk_{action}_participants\", f\"from={view_sid} to={target} pids={sel_pids}\")\n                        st.success(f\"Bulk {action} completed: {res}\")\n                        safe_rerun()\n                    except Exception as e:\n                        st.error(f\"Bulk op failed: {e}\")\n        else:\n            st.info(\"No other sessions to target for bulk move/copy\")\n```
-
-Notes / behavior
-- This UI:
-  - Lets you create/edit/delete sessions for the active project.
-  - Lets you view a session, see participants, remove participants from the session.
-  - Lets you add participants from the project's participant pool to the session (multi-select).
-  - Supports bulk move/copy of participants between sessions via the existing helper `bulk_move_copy_participants`.
-  - Uses `db_transaction()` everywhere for safe commits and `log_action()` for audit.
-- It assumes `st.session_state["current_project_name"]` is set (your project manager already maintains that).
-- If you'd like:
-  - I can also add CSV export of session participant lists.
-  - Or add a "reassign owner" function to reassign projects to another username (useful occasionally).
-  - Or automatically create a default session when a project is created.
-
-If you'd prefer, I can insert this block into the canvas file I created earlier and attach the updated `.py` for download. Which would you like?
+                    try:
+                        with db_transaction() as conn:
+                            res = bulk_move_copy_participants(conn, sel_pids, int(target), action=action)
+                            log_action(current_username, f"bulk_{action}_participants", f"from={view_sid} to={target} pids={sel_pids}")
+                        st.success(f"Bulk {action} completed: {res}")
+                        safe_rerun()
+                    except Exception as e:
+                        st.error(f"Bulk op failed: {e}")
+        else:
+            st.info("No other sessions to target for bulk move/copy")
 
         # ------------------------
         # Admin Dashboard: only render if role is Admin
